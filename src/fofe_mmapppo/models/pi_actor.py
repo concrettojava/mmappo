@@ -65,16 +65,16 @@ class PIActorConfig:
 class PIBeliefState:
     """Explicit recurrent state for one PI actor across a batch of environments."""
 
-    latent: torch.Tensor          # [B,E,K,D]
-    mode_logits: torch.Tensor     # [B,E,K]
-    position: torch.Tensor        # [B,E,K,2], normalized world coordinates
-    yaw: torch.Tensor             # [B,E,K,1], radians
-    speed: torch.Tensor           # [B,E,K,1], normalized world units / second
-    turn_limit: torch.Tensor      # [B,E,K,1], radians / second
-    age: torch.Tensor             # [B,E,1], seconds
-    known: torch.Tensor           # [B,E,1]
-    alive: torch.Tensor           # [B,E,1]
-    info_context: torch.Tensor    # [B,C]
+    latent: torch.Tensor
+    mode_logits: torch.Tensor
+    position: torch.Tensor
+    yaw: torch.Tensor
+    speed: torch.Tensor
+    turn_limit: torch.Tensor
+    age: torch.Tensor
+    known: torch.Tensor
+    alive: torch.Tensor
+    info_context: torch.Tensor
 
     def detach(self) -> "PIBeliefState":
         return PIBeliefState(**{k: v.detach() for k, v in self.__dict__.items()})
@@ -93,17 +93,7 @@ class PIBeliefState:
 
 
 class PIActor(nn.Module):
-    """Physical-information lattice actor.
-
-    The policy maintains persistent identity-aligned entity beliefs.  Each
-    forward step performs:
-
-    1. belief prediction and evidence correction;
-    2. multi-hypothesis physical rollout;
-    3. analytic candidate-action rollout;
-    4. action-conditioned information-future rollout;
-    5. physical/information lattice scoring.
-    """
+    """Physical-information lattice actor with persistent entity beliefs."""
 
     ACTION_VALUES = (-1.0, -0.4, -0.1, 0.0, 0.1, 0.4, 1.0)
 
@@ -123,7 +113,6 @@ class PIActor(nn.Module):
         self.mode_embedding = nn.Parameter(torch.empty(K, D))
         nn.init.normal_(self.mode_embedding, mean=0.0, std=0.05)
 
-        # Three heterogeneous entity categories: teammate, target, threat.
         dyn_in = D + D + D + 1
         self.context_to_belief = _linear(C, D, gain=1.0)
         self.dynamics = nn.ModuleList([_mlp(dyn_in, D, D) for _ in range(3)])
@@ -141,15 +130,13 @@ class PIActor(nn.Module):
         self.context_delta = _mlp(context_input_dim + C, C, C)
         self.context_gate = _mlp(context_input_dim + C, C, C)
 
-        # Information future uses local physical relations + inferred context.
         info_in = 3 + 2 + 3 + 1 + C
         self.observe_predictor = _mlp(info_in, C, 1)
         self.communicate_predictor = _mlp(info_in, C, 1)
 
-        # Lattice relation: dx,dy,distance,heading(sin/cos), mode prob,
-        # age, uncertainty, refresh probability, category one-hot, known,
-        # alive and normalized horizon = 14 scalars.
-        relation_in = 14
+        # dx,dy,distance + heading(sin/cos) + mode probability + age +
+        # uncertainty + refresh + category(3) + known + alive + horizon = 15.
+        relation_in = 15
         self.relation_encoders = nn.ModuleList(
             [_mlp(relation_in, c.relation_dim, c.relation_dim) for _ in range(3)]
         )
@@ -168,8 +155,6 @@ class PIActor(nn.Module):
             _linear(D, len(self.ACTION_VALUES), gain=0.01),
         )
 
-        # Positive uncertainty dynamics coefficients are learned through
-        # softplus, but initialized conservatively.
         self._dispersion_gain = nn.Parameter(torch.tensor(-2.0))
         self._age_gain = nn.Parameter(torch.tensor(-3.0))
         self._reset_uncertainty_logit = nn.Parameter(torch.tensor(-3.0))
@@ -208,13 +193,10 @@ class PIActor(nn.Module):
         )
 
     def _type_apply(self, modules: nn.ModuleList, x: torch.Tensor) -> torch.Tensor:
-        """Apply three type-specific modules and select by stable slot category."""
         outputs = torch.stack([module(x) for module in modules], dim=-2)
-        # x has [B,E,K,...] or [B,A,E,K,H,...].  Entity axis is inferred from
-        # the category broadcast shape supplied below.
-        if x.dim() == 4:  # [B,E,K,F]
+        if x.dim() == 4:
             cat = self.entity_category[None, :, None, :, None]
-        elif x.dim() == 6:  # [B,A,E,K,H,F]
+        elif x.dim() == 6:
             cat = self.entity_category[None, None, :, None, None, :, None]
         else:
             raise ValueError(f"unsupported typed tensor rank {x.dim()}")
@@ -290,14 +272,8 @@ class PIActor(nn.Module):
         gate = gate * evidence_k
         latent = prior_latent * (1.0 - gate[..., None]) + evidence * gate[..., None]
 
-        # Missing evidence gradually flattens modal confidence; fresh evidence
-        # performs evidence competition among hypotheses.
         flattened = prior_logits * 0.97
-        logits = torch.where(
-            evidence_k > 0.5,
-            flattened + scores,
-            flattened,
-        )
+        logits = torch.where(evidence_k > 0.5, flattened + scores, flattened)
 
         obs_pos = entity_features[:, :, None, 9:11].expand(B, E, K, 2)
         obs_yaw = (entity_features[:, :, None, 11:12] * math.pi).expand(B, E, K, 1)
@@ -307,7 +283,7 @@ class PIActor(nn.Module):
         cos_yaw = (1.0 - physical_gate) * torch.cos(prior_yaw) + physical_gate * torch.cos(obs_yaw)
         yaw = torch.atan2(sin_yaw, cos_yaw)
 
-        obs_speed = (entity_features[:, :, 18:19] * 50.0 / c.world_size)
+        obs_speed = entity_features[:, :, 18:19] * 50.0 / c.world_size
         obs_turn = entity_features[:, :, 19:20] * 40.0 * math.pi / 180.0
         obs_speed = obs_speed[:, :, None, :].expand(B, E, K, 1)
         obs_turn = obs_turn[:, :, None, :].expand(B, E, K, 1)
@@ -335,7 +311,7 @@ class PIActor(nn.Module):
             age=age_new,
             known=known,
             alive=alive,
-            info_context=state.info_context,  # replaced by caller
+            info_context=state.info_context,
         )
 
     def update_belief(
@@ -366,7 +342,6 @@ class PIActor(nn.Module):
     def _physical_future(
         self, state: PIBeliefState
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Roll entity hypotheses H steps into the physical future."""
         c = self.config
         B, E, K, _ = state.latent.shape
         latent = state.latent
@@ -391,13 +366,12 @@ class PIActor(nn.Module):
             yaws.append(yaw)
             latents.append(latent)
         return (
-            torch.stack(positions, dim=3),  # [B,E,K,H,2]
-            torch.stack(yaws, dim=3),       # [B,E,K,H,1]
-            torch.stack(latents, dim=3),    # [B,E,K,H,D]
+            torch.stack(positions, dim=3),
+            torch.stack(yaws, dim=3),
+            torch.stack(latents, dim=3),
         )
 
     def _action_future(self, self_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Analytic fixed-wing action primitives for the seven discrete actions."""
         c = self.config
         B = self_features.shape[0]
         subtype = self_features[:, 2:5]
@@ -423,11 +397,10 @@ class PIActor(nn.Module):
     def _base_dispersion(
         self, future_pos: torch.Tensor, mode_probs: torch.Tensor
     ) -> torch.Tensor:
-        # future_pos [B,E,K,H,2], mode_probs [B,E,K]
         w = mode_probs[:, :, :, None, None]
         mean = (future_pos * w).sum(dim=2, keepdim=True)
         var = ((future_pos - mean).square().sum(dim=-1) * mode_probs[:, :, :, None]).sum(dim=2)
-        return var  # [B,E,H]
+        return var
 
     def _information_future(
         self,
@@ -437,13 +410,10 @@ class PIActor(nn.Module):
         state: PIBeliefState,
         mode_probs: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Predict action-conditioned future observability/communication quality."""
         c = self.config
         B, A, H, _ = action_pos.shape
-        E, K = c.n_entities, c.n_hypotheses
-        mean_pos = (
-            future_pos * mode_probs[:, :, :, None, None]
-        ).sum(dim=2)  # [B,E,H,2]
+        E = c.n_entities
+        mean_pos = (future_pos * mode_probs[:, :, :, None, None]).sum(dim=2)
         category = self.entity_category[None, None, :, :].expand(B, A, E, 3)
         context = state.info_context[:, None, None, :].expand(B, A, E, -1)
         age = state.age.squeeze(-1)[:, None, :].expand(B, A, E)
@@ -468,9 +438,6 @@ class PIActor(nn.Module):
             info_input = torch.cat([delta, dist, heading, category, age_norm, context], dim=-1)
             q_obs = torch.sigmoid(self.observe_predictor(info_input)).squeeze(-1)
             q_com = torch.sigmoid(self.communicate_predictor(info_input)).squeeze(-1)
-            # Unknown entities cannot magically refresh without ever having an
-            # identity-bearing record in V1. Scenario 3 can relax this when a
-            # discovery process is explicitly represented.
             known_a = known[:, None, :].expand(B, A, E)
             q_obs = q_obs * known_a
             q_com = q_com * known_a
@@ -488,11 +455,11 @@ class PIActor(nn.Module):
             q_refresh_steps.append(q_refresh)
 
         return {
-            "expected_age": torch.stack(age_steps, dim=-1),             # [B,A,E,H]
-            "uncertainty": torch.stack(uncertainty_steps, dim=-1),      # [B,A,E,H]
-            "q_obs": torch.stack(q_obs_steps, dim=-1),                  # [B,A,E,H]
-            "q_com": torch.stack(q_com_steps, dim=-1),                  # [B,A,E,H]
-            "q_refresh": torch.stack(q_refresh_steps, dim=-1),          # [B,A,E,H]
+            "expected_age": torch.stack(age_steps, dim=-1),
+            "uncertainty": torch.stack(uncertainty_steps, dim=-1),
+            "q_obs": torch.stack(q_obs_steps, dim=-1),
+            "q_com": torch.stack(q_com_steps, dim=-1),
+            "q_refresh": torch.stack(q_refresh_steps, dim=-1),
         }
 
     def _interaction_lattice(
@@ -506,7 +473,6 @@ class PIActor(nn.Module):
         c = self.config
         B, A, H, _ = action_pos.shape
         E, K = c.n_entities, c.n_hypotheses
-        base_probs = torch.softmax(state.mode_logits, dim=-1)
         u = info["uncertainty"]
         temperature = 1.0 + c.uncertainty_temperature * u.clamp_min(0.0)
         logits = state.mode_logits[:, None, :, :, None].expand(B, A, E, K, H)
@@ -599,11 +565,7 @@ class PIActor(nn.Module):
         )
         cognitive_gate = torch.sigmoid(self.cognitive_gate(gate_input))
 
-        logits = (
-            self.self_action_head(self_features)
-            + task_value
-            + cognitive_gate * info_value
-        )
+        logits = self.self_action_head(self_features) + task_value + cognitive_gate * info_value
         aux = {
             **info,
             "future_position": future_pos,
