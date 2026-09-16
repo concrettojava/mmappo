@@ -1,7 +1,7 @@
 """Direct environment-to-array encoding for high-throughput MAPPO training.
 
 This module reproduces ``FixedVectorizer`` semantics without first materializing
-Eq. (8)/(9) nested dict/list pose structures.  The structured observation/state
+Eq. (8)/(9) nested dict/list pose structures. The structured observation/state
 path remains the reference/debug representation; this fast path exists only to
 remove Python object construction from the training hot loop.
 """
@@ -76,6 +76,26 @@ class DirectFixedVectorizer:
         out[offset + 1] = float(threat.radius) / self.world_size
         self._write_pose(out, offset + 2, observer, threat, yaw=0.0)
 
+    def _record_cache(self, observer, uavs, targets, threats):
+        """Encode each observer/object pair once and reuse the record blocks.
+
+        The fixed local observation and centralized state duplicate many of the
+        same objects.  Previously every copy recomputed sin/cos, body-frame
+        coordinates, range and bearing.  Cache the final float32 record blocks
+        for this observer, then assemble observation/state by slice copies.
+        """
+        uav_records = np.zeros((self.n_uavs, self.uav_dim), dtype=np.float32)
+        target_records = np.zeros((self.n_targets, self.target_dim), dtype=np.float32)
+        threat_records = np.zeros((self.n_threats, self.threat_dim), dtype=np.float32)
+
+        for u in uavs[: self.n_uavs]:
+            self._write_uav(uav_records[u.idx], 0, observer, u)
+        for t in targets[: self.n_targets]:
+            self._write_target(target_records[t.idx], 0, observer, t)
+        for th in threats[: self.n_threats]:
+            self._write_threat(threat_records[th.idx], 0, observer, th)
+        return uav_records, target_records, threat_records
+
     def encode_env(self, env):
         """Return ``obs, state, active`` with exactly FixedVectorizer shapes."""
         obs = np.zeros((self.n_uavs, self.observation_dim), dtype=np.float32)
@@ -93,71 +113,56 @@ class DirectFixedVectorizer:
 
         for observer_idx in range(self.n_uavs):
             observer = uavs[observer_idx]
+            uav_records, target_records, threat_records = self._record_cache(
+                observer, uavs, targets, threats
+            )
 
             # Local observation: same channel layout/padding as FixedVectorizer.
             if observer.alive:
                 active[observer_idx] = 1.0
                 p = 0
-                self._write_uav(obs[observer_idx], p, observer, observer)
+                obs[observer_idx, p:p + self.uav_dim] = uav_records[observer_idx]
                 p += self.uav_dim
 
                 subgroup = components.get(observer_idx, {observer_idx})
                 row = 0
                 for idx in sorted(subgroup - {observer_idx}):
-                    u = uavs[idx]
-                    if u.alive and row < self.n_uavs - 1:
-                        self._write_uav(
-                            obs[observer_idx], p + row * self.uav_dim, observer, u
-                        )
+                    if uavs[idx].alive and row < self.n_uavs - 1:
+                        start = p + row * self.uav_dim
+                        obs[observer_idx, start:start + self.uav_dim] = uav_records[idx]
                         row += 1
                 p += (self.n_uavs - 1) * self.uav_dim
 
                 visible_targets, visible_threats = shared.get(observer_idx, (set(), set()))
                 row = 0
                 for idx in sorted(visible_targets):
-                    t = targets[idx]
-                    if t.alive and row < self.n_targets:
-                        self._write_target(
-                            obs[observer_idx], p + row * self.target_dim, observer, t
-                        )
+                    if targets[idx].alive and row < self.n_targets:
+                        start = p + row * self.target_dim
+                        obs[observer_idx, start:start + self.target_dim] = target_records[idx]
                         row += 1
                 p += self.n_targets * self.target_dim
 
                 for row, idx in enumerate(sorted(visible_threats)[: self.n_threats]):
-                    self._write_threat(
-                        obs[observer_idx], p + row * self.threat_dim, observer, threats[idx]
-                    )
+                    start = p + row * self.threat_dim
+                    obs[observer_idx, start:start + self.threat_dim] = threat_records[idx]
 
             # Centralized state: exact current FixedVectorizer state schema.
             p = 0
-            for row, u in enumerate(uavs[: self.n_uavs]):
-                self._write_uav(
-                    state[observer_idx], p + row * self.uav_dim, observer, u
-                )
+            state[observer_idx, p:p + self.n_uavs * self.uav_dim] = uav_records.reshape(-1)
             p += self.n_uavs * self.uav_dim
 
             row = 0
-            for u in uavs:
-                if u.idx == observer_idx:
+            for idx in range(self.n_uavs):
+                if idx == observer_idx:
                     continue
-                if row >= self.n_uavs - 1:
-                    break
-                self._write_uav(
-                    state[observer_idx], p + row * self.uav_dim, observer, u
-                )
+                start = p + row * self.uav_dim
+                state[observer_idx, start:start + self.uav_dim] = uav_records[idx]
                 row += 1
             p += (self.n_uavs - 1) * self.uav_dim
 
-            for row, t in enumerate(targets[: self.n_targets]):
-                self._write_target(
-                    state[observer_idx], p + row * self.target_dim, observer, t
-                )
+            state[observer_idx, p:p + self.n_targets * self.target_dim] = target_records.reshape(-1)
             p += self.n_targets * self.target_dim
-
-            for row, th in enumerate(threats[: self.n_threats]):
-                self._write_threat(
-                    state[observer_idx], p + row * self.threat_dim, observer, th
-                )
+            state[observer_idx, p:p + self.n_threats * self.threat_dim] = threat_records.reshape(-1)
 
         return obs, state, active
 
