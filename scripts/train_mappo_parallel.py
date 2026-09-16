@@ -8,10 +8,13 @@ Acceleration comes from:
 1. collecting several independent episodes before each PPO update;
 2. batching one agent's Actor/Critic inference across all environments;
 3. using much larger PPO mini-batches on GPU;
-4. enabling TF32-friendly float32 matmul precision on supported NVIDIA GPUs.
+4. enabling TF32-friendly float32 matmul precision on supported NVIDIA GPUs;
+5. reducing Python/file-I/O overhead in the training loop.
 
 Environment transitions themselves remain ordinary CooperativeUAVEnv.step()
-calls, so environment/reward semantics are unchanged.
+calls, so environment/reward semantics are unchanged.  Since multiple episodes
+are combined into one PPO update, optimization dynamics are not identical to
+the single-environment reference trainer.
 """
 from __future__ import annotations
 
@@ -37,12 +40,6 @@ def choose_device(name: str) -> str:
     if name != "auto":
         return name
     return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def make_env(seed: int) -> CooperativeUAVEnv:
-    env = CooperativeUAVEnv(seed=seed)
-    env.reset(seed=seed)
-    return env
 
 
 def encode_batch(vectorizer, observations, states, finished):
@@ -100,8 +97,7 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-    # Ampere+ can use TF32 internally for float32 matrix multiplications.  This
-    # does not change environment logic and is usually beneficial for MLPs.
+    # On Ampere+ this permits TF32 internally for eligible float32 GEMMs.
     torch.set_float32_matmul_precision("high")
 
     device = choose_device(args.device)
@@ -149,11 +145,22 @@ def main():
     last_log_episode = processed
 
     while processed < args.episodes:
-        batch_envs = min(args.num_envs, args.episodes - processed)
+        # Do not cross a requested checkpoint boundary; this keeps filenames at
+        # exact 500/1000/... episode numbers even when num_envs is not a divisor.
+        next_save = ((processed // args.save_every) + 1) * args.save_every
+        batch_envs = min(
+            args.num_envs,
+            args.episodes - processed,
+            max(1, next_save - processed),
+        )
         episode_ids = np.arange(processed + 1, processed + batch_envs + 1, dtype=np.int64)
-        envs = [make_env(args.seed + int(ep) - 1) for ep in episode_ids]
-        observations, states = zip(*(env.reset(seed=args.seed + int(ep) - 1) for env, ep in zip(envs, episode_ids)))
-        observations, states = list(observations), list(states)
+        envs = [CooperativeUAVEnv(seed=args.seed + int(ep) - 1) for ep in episode_ids]
+        reset_results = [
+            env.reset(seed=args.seed + int(ep) - 1)
+            for env, ep in zip(envs, episode_ids)
+        ]
+        observations = [item[0] for item in reset_results]
+        states = [item[1] for item in reset_results]
 
         finished = np.zeros(batch_envs, dtype=bool)
         episode_returns = np.zeros((batch_envs, 8), dtype=np.float32)
@@ -173,9 +180,13 @@ def main():
                 if finished[e]:
                     continue
                 next_obs, next_state, rewards, done, info = env.step(actions[e])
-                reward_batch[e] = np.asarray([rewards[i] for i in range(8)], dtype=np.float32)
-                done_batch[e] = np.asarray(
-                    [done or next_obs[i] is None for i in range(8)], dtype=np.float32
+                reward_batch[e] = np.fromiter(
+                    (rewards[i] for i in range(8)), dtype=np.float32, count=8
+                )
+                done_batch[e] = np.fromiter(
+                    (done or next_obs[i] is None for i in range(8)),
+                    dtype=np.float32,
+                    count=8,
                 )
                 episode_returns[e] += reward_batch[e]
                 next_observations[e] = next_obs
@@ -193,13 +204,14 @@ def main():
         losses = learner.update_parallel(buffer)
         now = time.perf_counter()
 
+        records = []
         for e, episode_id in enumerate(episode_ids.tolist()):
             info = final_infos[e]
             mean_return = float(episode_returns[e].mean())
             recent_returns.append(mean_return)
             if len(recent_returns) > 100:
                 recent_returns.pop(0)
-            record = {
+            records.append({
                 "episode": int(episode_id),
                 "mean_return": mean_return,
                 "steps": int(info["step"]),
@@ -207,9 +219,9 @@ def main():
                 "survival_ratio": float(info["survival_ratio"]),
                 "num_envs": int(batch_envs),
                 **losses,
-            }
-            with metrics_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            })
+        with metrics_path.open("a", encoding="utf-8") as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
 
         previous = processed
         processed += batch_envs
@@ -217,18 +229,16 @@ def main():
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
             elapsed = now - run_start
             eps_per_sec = (processed - start_episode) / max(elapsed, 1e-9)
-            infos = final_infos
             print(
                 f"ep={processed:6d} avg100={np.mean(recent_returns):9.3f} "
-                f"batch_completion={np.mean([i['completion_ratio'] for i in infos]):.3f} "
-                f"batch_survival={np.mean([i['survival_ratio'] for i in infos]):.3f} "
+                f"batch_completion={np.mean([i['completion_ratio'] for i in final_infos]):.3f} "
+                f"batch_survival={np.mean([i['survival_ratio'] for i in final_infos]):.3f} "
                 f"actor={losses['actor_loss']:.4f} critic={losses['critic_loss']:.4f} "
                 f"speed={eps_per_sec:.3f} ep/s"
             )
             last_log_episode = processed
 
-        crossed_save = (previous // args.save_every) != (processed // args.save_every)
-        if crossed_save or processed == args.episodes:
+        if processed % args.save_every == 0 or processed == args.episodes:
             save_checkpoint(
                 args.output / f"checkpoint_{processed:06d}.pt",
                 learner, vectorizer, processed, args.num_envs,
