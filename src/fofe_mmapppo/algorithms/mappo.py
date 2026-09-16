@@ -128,6 +128,45 @@ class MAPPO:
             values[i] = float(self.critics[i](state).item())
         return values
 
+    def _new_metric_accumulator(self):
+        """Keep PPO diagnostics on-device until the complete update finishes.
+
+        The previous implementation copied actor loss, critic loss and entropy
+        to CPU for every minibatch.  On CUDA that forces thousands of implicit
+        synchronizations per PPO update.  Accumulating detached scalars on the
+        device preserves identical reporting semantics while synchronizing only
+        once at the end of the update.
+        """
+        zero = torch.zeros((), dtype=torch.float32, device=self.device)
+        return {
+            "actor_loss": zero.clone(),
+            "critic_loss": zero.clone(),
+            "entropy": zero.clone(),
+            "count": 0,
+        }
+
+    @staticmethod
+    def _accumulate_metrics(metrics, actor_loss, critic_loss, entropy):
+        metrics["actor_loss"].add_(actor_loss.detach())
+        metrics["critic_loss"].add_(critic_loss.detach())
+        metrics["entropy"].add_(entropy.mean().detach())
+        metrics["count"] += 1
+
+    def _finalize_metrics(self, metrics) -> Dict[str, float]:
+        count = int(metrics["count"])
+        if count == 0:
+            return {"actor_loss": 0.0, "critic_loss": 0.0, "entropy": 0.0}
+        values = torch.stack((
+            metrics["actor_loss"] / count,
+            metrics["critic_loss"] / count,
+            metrics["entropy"] / count,
+        )).detach().cpu().numpy()
+        return {
+            "actor_loss": float(values[0]),
+            "critic_loss": float(values[1]),
+            "entropy": float(values[2]),
+        }
+
     def _update_flat_agent(self, agent: int, obs, states, actions,
                            old_log_probs, returns, advantages, metrics):
         if advantages.numel() > 1:
@@ -161,9 +200,7 @@ class MAPPO:
                 nn.utils.clip_grad_norm_(self.critics[agent].parameters(), self.config.max_grad_norm)
                 self.critic_optimizers[agent].step()
 
-                metrics["actor_loss"].append(float(actor_loss.detach().cpu()))
-                metrics["critic_loss"].append(float(critic_loss.detach().cpu()))
-                metrics["entropy"].append(float(entropy.mean().detach().cpu()))
+                self._accumulate_metrics(metrics, actor_loss, critic_loss, entropy)
 
     def update(self, buffer: RolloutBuffer) -> Dict[str, float]:
         if len(buffer) == 0:
@@ -171,7 +208,7 @@ class MAPPO:
 
         data_np = buffer.compute_gae(self.config.gamma, self.config.gae_lambda)
         data = RolloutBuffer.to_torch(data_np, self.device)
-        metrics = {"actor_loss": [], "critic_loss": [], "entropy": []}
+        metrics = self._new_metric_accumulator()
 
         for agent in range(self.n_agents):
             active_idx = torch.nonzero(data["active"][:, agent] > 0.5, as_tuple=False).squeeze(-1)
@@ -187,7 +224,7 @@ class MAPPO:
                 data["advantages"][active_idx, agent],
                 metrics,
             )
-        return {key: float(np.mean(v)) if v else 0.0 for key, v in metrics.items()}
+        return self._finalize_metrics(metrics)
 
     def update_parallel(self, buffer: ParallelRolloutBuffer) -> Dict[str, float]:
         """PPO update from ``[T,E,N,...]`` parallel trajectories."""
@@ -196,7 +233,7 @@ class MAPPO:
 
         data_np = buffer.compute_gae(self.config.gamma, self.config.gae_lambda)
         data = ParallelRolloutBuffer.to_torch(data_np, self.device)
-        metrics = {"actor_loss": [], "critic_loss": [], "entropy": []}
+        metrics = self._new_metric_accumulator()
 
         for agent in range(self.n_agents):
             mask = data["active"][:, :, agent] > 0.5
@@ -212,7 +249,7 @@ class MAPPO:
                 data["advantages"][:, :, agent][mask],
                 metrics,
             )
-        return {key: float(np.mean(v)) if v else 0.0 for key, v in metrics.items()}
+        return self._finalize_metrics(metrics)
 
     def checkpoint(self, include_optimizers: bool = False):
         checkpoint = {
@@ -224,7 +261,7 @@ class MAPPO:
         }
         if include_optimizers:
             checkpoint["actor_optimizers"] = [opt.state_dict() for opt in self.actor_optimizers]
-            checkpoint["critic_optimizers"] = [opt.state_dict() for opt in self.critic_optimizers]
+            checkpoint["critic_optimizers"] = [opt.state_dict() for opt in self.critics]
         return checkpoint
 
     def load_checkpoint(self, checkpoint: dict, load_optimizers: bool = False):
