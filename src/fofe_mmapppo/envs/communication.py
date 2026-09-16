@@ -9,9 +9,10 @@ from .entities import UAV
 def communication_graph(env) -> Dict[int, Set[int]]:
     """Build the direct communication graph.
 
-    The scenario is tiny (at most 8 UAVs), so plain Python loops are faster here
-    than allocating NumPy matrices every environment step.  We still keep the
-    reuse hooks in ``shared_detection`` so geometry is not recomputed twice.
+    In the reference scenario this is the reproduced range rule. In the
+    contested scenario each endpoint's effective communication range is reduced
+    by the local jammer field; a link must fit inside the better endpoint's
+    degraded radio range, preserving the original heterogeneous-range logic.
     """
     alive = [u for u in env.uavs if u.alive]
     graph = {u.idx: set() for u in alive}
@@ -19,7 +20,9 @@ def communication_graph(env) -> Dict[int, Set[int]]:
         for b in alive[i + 1:]:
             dx = a.x - b.x
             dy = a.y - b.y
-            limit = max(a.p["comm_range"], b.p["comm_range"])
+            range_a = float(a.p["comm_range"]) * env.communication_factor(a)
+            range_b = float(b.p["comm_range"]) * env.communication_factor(b)
+            limit = max(range_a, range_b)
             if dx * dx + dy * dy < limit * limit:
                 graph[a.idx].add(b.idx)
                 graph[b.idx].add(a.idx)
@@ -48,7 +51,8 @@ def communication_components(env, graph=None) -> Dict[int, Set[int]]:
 
 
 def _direct_detected_targets(env, uav: UAV) -> Set[int]:
-    limit2 = float(uav.p["recon_range"]) ** 2
+    effective_range = float(uav.p["recon_range"]) * env.reconnaissance_factor(uav)
+    limit2 = effective_range ** 2
     ux, uy = uav.x, uav.y
     return {
         t.idx
@@ -58,7 +62,8 @@ def _direct_detected_targets(env, uav: UAV) -> Set[int]:
 
 
 def _direct_detected_threats(env, uav: UAV) -> Set[int]:
-    limit2 = float(uav.p["recon_range"]) ** 2
+    effective_range = float(uav.p["recon_range"]) * env.reconnaissance_factor(uav)
+    limit2 = effective_range ** 2
     ux, uy = uav.x, uav.y
     found = {
         th.idx
