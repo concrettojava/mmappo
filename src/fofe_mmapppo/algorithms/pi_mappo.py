@@ -43,9 +43,12 @@ class PIMAPPOConfig:
     fused_adam: bool = True
     # Micro-benchmarking on the PIActor showed that the model is strongly
     # launch-bound.  Compilation is therefore enabled by default on CUDA, but
-    # never on CPU.  Set PI_DISABLE_TORCH_COMPILE=1 for an eager A/B run.
+    # never on CPU.  Recurrent-sequence benchmarking showed that the normal
+    # compile mode is much faster than reduce-overhead for BPTT, whose retained
+    # state graph prevents the latter's CUDAGraph fast path from working well.
+    # Set PI_DISABLE_TORCH_COMPILE=1 for an eager A/B run.
     compile_actors: bool = True
-    actor_compile_mode: str = "reduce-overhead"
+    actor_compile_mode: str = "default"
 
 
 class PIMAPPO:
