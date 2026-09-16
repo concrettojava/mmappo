@@ -22,7 +22,14 @@ from fofe_mmapppo.visualization.renderer import SceneRenderer
 
 
 class MAPPOEpisodeViewer:
-    def __init__(self, checkpoint: Path, seed: int, device: str, interval_ms: int, stochastic: bool):
+    def __init__(
+        self,
+        checkpoint: Path,
+        seed: int,
+        device: str,
+        interval_ms: int,
+        stochastic: bool,
+    ):
         self.seed = int(seed)
         self.device = device
         self.interval_ms = int(interval_ms)
@@ -36,6 +43,7 @@ class MAPPOEpisodeViewer:
         self.done = False
         self.total_return = np.zeros(self.learner.n_agents, dtype=np.float32)
         self.final_info = None
+        self.event_ttl = 0
 
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self.anim = FuncAnimation(
@@ -54,6 +62,7 @@ class MAPPOEpisodeViewer:
         self.done = False
         self.total_return.fill(0.0)
         self.final_info = None
+        self.event_ttl = 0
 
     def _on_key(self, event):
         if event.key == " ":
@@ -76,6 +85,24 @@ class MAPPOEpisodeViewer:
             deterministic=not self.stochastic,
         )[0]
 
+    @staticmethod
+    def _event_summary(info) -> str:
+        events = []
+        strikes = info.get("strikes", [])
+        if strikes:
+            events.append(
+                "Strike " + ", ".join(f"U{uid}->M{tid}" for uid, tid in strikes)
+            )
+        threat_dead = info.get("threat_dead", [])
+        if threat_dead:
+            events.append("Threat loss " + ", ".join(f"U{uid}" for uid in threat_dead))
+        collision_dead = info.get("collision_dead", [])
+        if collision_dead:
+            events.append(
+                "Collision loss " + ", ".join(f"U{uid}" for uid in collision_dead)
+            )
+        return " | ".join(events)
+
     def _step(self):
         actions = self._policy_action()
         self.obs, _, rewards, done, info = self.env.step(actions)
@@ -85,6 +112,18 @@ class MAPPOEpisodeViewer:
             count=self.learner.n_agents,
         )
         self.renderer.record_tracks()
+
+        event_text = self._event_summary(info)
+        if event_text:
+            self.renderer.set_event_text(event_text)
+            # Keep rare combat events visible long enough to notice even with a
+            # fast animation interval.
+            self.event_ttl = 12
+        elif self.event_ttl > 0:
+            self.event_ttl -= 1
+            if self.event_ttl == 0:
+                self.renderer.set_event_text("")
+
         if done:
             self.done = True
             self.paused = True
@@ -121,7 +160,9 @@ def main():
     parser.add_argument("--seed", type=int, default=10000)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--interval", type=int, default=80, help="milliseconds between frames")
-    parser.add_argument("--stochastic", action="store_true", help="sample policy actions instead of argmax")
+    parser.add_argument(
+        "--stochastic", action="store_true", help="sample policy actions instead of argmax"
+    )
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error("interval must be positive")
