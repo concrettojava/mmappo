@@ -1,15 +1,13 @@
 """High-throughput MAPPO training with multiple independent environments.
 
-This is an engineering acceleration path.  The paper does not explicitly state
+This is an engineering acceleration path. The paper does not explicitly state
 that its 32 random environments are stepped as a vectorized training batch.
 The single-environment trainer remains the strict reference implementation.
 
-Acceleration comes from:
-1. collecting several independent episodes before each PPO update;
-2. batching one agent's Actor/Critic inference across all environments;
-3. using much larger PPO mini-batches on GPU;
-4. enabling TF32-friendly float32 matmul precision on supported NVIDIA GPUs;
-5. reducing Python/file-I/O overhead in the training loop.
+The parallel trainer uses a direct environment-to-fixed-vector rollout path so
+training does not materialize the flexible Eq. (8)/(9) dict/list observation
+objects and then immediately encode them back into arrays. The direct encoder is
+covered by parity tests against the structured reference representation.
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from fofe_mmapppo.algorithms import MAPPO, MAPPOConfig, ParallelRolloutBuffer
 from fofe_mmapppo.envs import CooperativeUAVEnv
-from fofe_mmapppo.models import FixedVectorizer
+from fofe_mmapppo.models import DirectFixedVectorizer, FixedVectorizer
 from fofe_mmapppo.terminal_status import FixedStatusHeader
 
 
@@ -65,23 +63,6 @@ def status_text(processed, total, speed, sec_per_ep, elapsed):
     )
 
 
-def encode_batch(vectorizer, observations, states, finished):
-    E = len(observations)
-    N = 8
-    obs_batch = np.zeros((E, N, vectorizer.observation_dim), dtype=np.float32)
-    state_batch = np.zeros((E, N, vectorizer.state_dim), dtype=np.float32)
-    active = np.zeros((E, N), dtype=np.float32)
-    for e in range(E):
-        if finished[e]:
-            continue
-        obs_batch[e] = vectorizer.batch_observations(observations[e])
-        state_batch[e] = vectorizer.batch_states(states[e])
-        active[e] = np.asarray(
-            [observations[e][i] is not None for i in range(N)], dtype=np.float32
-        )
-    return obs_batch, state_batch, active
-
-
 def save_checkpoint(path, learner, vectorizer, episode, num_envs):
     torch.save(
         {
@@ -110,8 +91,9 @@ def main():
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs" / "mappo_parallel")
-    parser.add_argument("--no-tensorboard", action="store_true",
-                        help="disable TensorBoard scalar logging")
+    parser.add_argument(
+        "--no-tensorboard", action="store_true", help="disable TensorBoard scalar logging"
+    )
     args = parser.parse_args()
 
     if args.episodes <= 0 or args.num_envs <= 0 or args.minibatch_size <= 0:
@@ -132,6 +114,7 @@ def main():
         n_targets=4,
         n_threats=3,
     )
+    direct_vectorizer = DirectFixedVectorizer(vectorizer)
 
     start_episode = 0
     checkpoint = None
@@ -165,7 +148,8 @@ def main():
 
     print(
         f"device={device} num_envs={args.num_envs} minibatch={cfg.minibatch_size} "
-        f"obs_dim={vectorizer.observation_dim} state_dim={vectorizer.state_dim}"
+        f"obs_dim={vectorizer.observation_dim} state_dim={vectorizer.state_dim} "
+        f"rollout=direct-vector"
     )
     if writer is not None:
         print(f"tensorboard={args.output / 'tensorboard'}")
@@ -186,12 +170,18 @@ def main():
         )
         episode_ids = np.arange(processed + 1, processed + batch_envs + 1, dtype=np.int64)
         envs = [CooperativeUAVEnv(seed=args.seed + int(ep) - 1) for ep in episode_ids]
-        reset_results = [
-            env.reset(seed=args.seed + int(ep) - 1)
-            for env, ep in zip(envs, episode_ids)
-        ]
-        observations = [item[0] for item in reset_results]
-        states = [item[1] for item in reset_results]
+
+        obs_vec = np.zeros(
+            (batch_envs, 8, vectorizer.observation_dim), dtype=np.float32
+        )
+        state_vec = np.zeros(
+            (batch_envs, 8, vectorizer.state_dim), dtype=np.float32
+        )
+        active = np.zeros((batch_envs, 8), dtype=np.float32)
+        for e, (env, episode_id) in enumerate(zip(envs, episode_ids)):
+            obs_vec[e], state_vec[e], active[e] = env.reset_vectors(
+                direct_vectorizer, seed=args.seed + int(episode_id) - 1
+            )
 
         finished = np.zeros(batch_envs, dtype=bool)
         episode_returns = np.zeros((batch_envs, 8), dtype=np.float32)
@@ -199,38 +189,46 @@ def main():
         buffer = ParallelRolloutBuffer(n_envs=batch_envs, n_agents=8)
 
         while not bool(finished.all()):
-            obs_vec, state_vec, active = encode_batch(vectorizer, observations, states, finished)
             actions, log_probs, values = learner.act_batch(obs_vec, state_vec, active)
 
             reward_batch = np.zeros((batch_envs, 8), dtype=np.float32)
             done_batch = np.ones((batch_envs, 8), dtype=np.float32)
-            next_observations = list(observations)
-            next_states = list(states)
+            next_obs = np.zeros_like(obs_vec)
+            next_state = np.zeros_like(state_vec)
+            next_active = np.zeros_like(active)
 
             for e, env in enumerate(envs):
                 if finished[e]:
                     continue
-                next_obs, next_state, rewards, done, info = env.step(actions[e])
+                o, s, a, rewards, done, info = env.step_vectors(
+                    actions[e], direct_vectorizer
+                )
+                next_obs[e] = o
+                next_state[e] = s
+                next_active[e] = a
                 reward_batch[e] = np.fromiter(
                     (rewards[i] for i in range(8)), dtype=np.float32, count=8
                 )
-                done_batch[e] = np.fromiter(
-                    (done or next_obs[i] is None for i in range(8)),
+                done_batch[e] = np.asarray(
+                    [1.0 if done or a[i] == 0.0 else 0.0 for i in range(8)],
                     dtype=np.float32,
-                    count=8,
                 )
                 episode_returns[e] += reward_batch[e]
-                next_observations[e] = next_obs
-                next_states[e] = next_state
                 if done:
                     finished[e] = True
                     final_infos[e] = info
 
             buffer.add(
-                obs_vec, state_vec, actions, log_probs,
-                reward_batch, done_batch, values, active,
+                obs_vec,
+                state_vec,
+                actions,
+                log_probs,
+                reward_batch,
+                done_batch,
+                values,
+                active,
             )
-            observations, states = next_observations, next_states
+            obs_vec, state_vec, active = next_obs, next_state, next_active
 
         losses = learner.update_parallel(buffer)
         now = time.perf_counter()
@@ -256,8 +254,12 @@ def main():
             if writer is not None:
                 writer.add_scalar("train/mean_return", mean_return, episode_id)
                 writer.add_scalar("train/avg100_return", avg100, episode_id)
-                writer.add_scalar("task/completion_ratio", record["completion_ratio"], episode_id)
-                writer.add_scalar("task/survival_ratio", record["survival_ratio"], episode_id)
+                writer.add_scalar(
+                    "task/completion_ratio", record["completion_ratio"], episode_id
+                )
+                writer.add_scalar(
+                    "task/survival_ratio", record["survival_ratio"], episode_id
+                )
                 writer.add_scalar("task/episode_steps", record["steps"], episode_id)
 
         with metrics_path.open("a", encoding="utf-8") as f:
@@ -279,17 +281,22 @@ def main():
 
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
             last = records[-1]
-            batch_completion = float(np.mean([i["completion_ratio"] for i in final_infos]))
+            batch_completion = float(
+                np.mean([i["completion_ratio"] for i in final_infos])
+            )
             batch_survival = float(np.mean([i["survival_ratio"] for i in final_infos]))
             header.log(
-                f"ep={processed:6d} return={last['mean_return']:9.3f} avg100={np.mean(recent_returns):9.3f} "
-                f"steps={last['steps']:3d} completion={last['completion_ratio']:.3f} "
+                f"ep={processed:6d} return={last['mean_return']:9.3f} "
+                f"avg100={np.mean(recent_returns):9.3f} steps={last['steps']:3d} "
+                f"completion={last['completion_ratio']:.3f} "
                 f"survival={last['survival_ratio']:.3f} batch_c={batch_completion:.3f} "
                 f"batch_s={batch_survival:.3f} actor={losses['actor_loss']:.4f} "
                 f"critic={losses['critic_loss']:.4f}"
             )
             if writer is not None:
-                writer.add_scalar("task/batch_completion_ratio", batch_completion, processed)
+                writer.add_scalar(
+                    "task/batch_completion_ratio", batch_completion, processed
+                )
                 writer.add_scalar("task/batch_survival_ratio", batch_survival, processed)
                 writer.flush()
             if not header.enabled:
@@ -299,7 +306,10 @@ def main():
         if processed % args.save_every == 0 or processed == args.episodes:
             save_checkpoint(
                 args.output / f"checkpoint_{processed:06d}.pt",
-                learner, vectorizer, processed, args.num_envs,
+                learner,
+                vectorizer,
+                processed,
+                args.num_envs,
             )
 
     header.close()
