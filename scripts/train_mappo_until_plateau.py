@@ -47,7 +47,7 @@ def run_training_chunk(args, target_episode: int, resume: Path | None) -> Path:
         "--log-every",
         str(args.log_every),
         "--save-every",
-        str(args.save_every or args.eval_every),
+        str(args.save_every or target_episode),
         "--seed",
         str(args.seed),
         "--output",
@@ -100,7 +100,7 @@ def main():
     parser.add_argument("--minibatch-size", type=int, default=1024)
     parser.add_argument("--log-every", type=int, default=128)
     parser.add_argument("--save-every", type=int, default=None,
-                        help="training checkpoint interval; defaults to eval-every")
+                        help="optional inner-training checkpoint interval; by default only validation checkpoints are saved")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs" / "mappo_until_plateau")
     parser.add_argument("--no-tensorboard", action="store_true")
 
