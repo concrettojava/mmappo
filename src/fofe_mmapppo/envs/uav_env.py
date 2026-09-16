@@ -4,7 +4,7 @@ import numpy as np
 from typing import List
 from .entities import UAV, Target, Threat
 from .scenario import reset_scene
-from . import dynamics, communication, combat, observation, state
+from . import dynamics, communication, combat, observation, state, reward
 
 class CooperativeUAVEnv:
     """
@@ -20,6 +20,7 @@ class CooperativeUAVEnv:
       - automatic strike
       - collision destruction
       - probabilistic threat destruction
+      - paper reward Eqs. (11)-(17)
       - 1 s step, 200-step episode
 
     This file intentionally does NOT implement MAPPO/FOFE/Mamba yet.
@@ -113,17 +114,39 @@ class CooperativeUAVEnv:
         return state.get_global_states(self)
 
     def step(self, action_indices):
+        """Advance one second and return observation, state, reward, done, info.
+
+        Reward shaping needs the post-maneuver geometry before automatic combat
+        effects.  A reward context is therefore captured after UAV/target motion
+        and detection, then strike/collision/threat damage is resolved, and the
+        final Eq. (17) reward is evaluated with post-transition mission status.
+        """
         if len(action_indices) != len(self.uavs):
             raise ValueError(f"Expected {len(self.uavs)} actions, got {len(action_indices)}")
+
+        previous_action_u = {u.idx: float(u.last_action_u) for u in self.uavs}
 
         self.step_count += 1
         self._update_uavs(action_indices)
         self._update_targets()
 
-        shared = self.shared_detection()
+        reward_ctx = reward.build_reward_context(self, previous_action_u)
+        shared = {
+            uid: (
+                set(reward_ctx.shared_targets.get(uid, set())),
+                set(reward_ctx.shared_threats.get(uid, set())),
+            )
+            for uid in reward_ctx.active_before
+        }
+
         strikes = self._automatic_strikes(shared)
         collision_dead = self._apply_collisions()
         threat_dead = self._apply_threat_damage()
+        newly_destroyed = set(collision_dead) | set(threat_dead)
+
+        rewards, reward_breakdown = reward.compute_rewards(
+            self, reward_ctx, newly_destroyed
+        )
 
         done = (
             self.step_count >= self.max_steps
@@ -140,5 +163,6 @@ class CooperativeUAVEnv:
             "alive_targets": sum(t.alive for t in self.targets),
             "completion_ratio": 1.0 - sum(t.alive for t in self.targets) / len(self.targets),
             "survival_ratio": sum(u.alive for u in self.uavs) / len(self.uavs),
+            "reward_breakdown": reward_breakdown,
         }
-        return self.get_observations(), self.get_global_state(), done, info
+        return self.get_observations(), self.get_global_state(), rewards, done, info
