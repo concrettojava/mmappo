@@ -275,23 +275,39 @@ class PIActor(nn.Module):
         flattened = prior_logits * 0.97
         logits = torch.where(evidence_k > 0.5, flattened + scores, flattened)
 
-        obs_pos = entity_features[:, :, None, 9:11].expand(B, E, K, 2)
-        obs_yaw = (entity_features[:, :, None, 11:12] * math.pi).expand(B, E, K, 1)
+        # Evidence may be stale.  ``entity_features`` stores the location at the
+        # evidence timestamp, not necessarily the current environment step.  Before
+        # correction, dead-reckon that evidence to the present under the simplest
+        # execution-time model available to the decentralized actor: constant
+        # speed and heading.  This is exact for static threats, neutral for fresh
+        # evidence (age=0), and deliberately does not use hidden simulator truth.
+        supplied_age = evidence_meta[:, :, 0:1] * c.max_age
+        obs_pos_now = entity_features[:, :, 9:11]
+        obs_yaw_now = entity_features[:, :, 11:12] * math.pi
+        obs_speed_now = entity_features[:, :, 18:19] * 50.0 / c.world_size
+        stale_delta = torch.cat(
+            [
+                obs_speed_now * supplied_age * torch.sin(obs_yaw_now),
+                obs_speed_now * supplied_age * torch.cos(obs_yaw_now),
+            ],
+            dim=-1,
+        )
+        aligned_pos = (obs_pos_now + stale_delta).clamp(0.0, 1.0)
+        obs_pos = aligned_pos[:, :, None, :].expand(B, E, K, 2)
+        obs_yaw = obs_yaw_now[:, :, None, :].expand(B, E, K, 1)
         physical_gate = gate[..., None]
         position = prior_position * (1.0 - physical_gate) + obs_pos * physical_gate
         sin_yaw = (1.0 - physical_gate) * torch.sin(prior_yaw) + physical_gate * torch.sin(obs_yaw)
         cos_yaw = (1.0 - physical_gate) * torch.cos(prior_yaw) + physical_gate * torch.cos(obs_yaw)
         yaw = torch.atan2(sin_yaw, cos_yaw)
 
-        obs_speed = entity_features[:, :, 18:19] * 50.0 / c.world_size
+        obs_speed = obs_speed_now[:, :, None, :].expand(B, E, K, 1)
         obs_turn = entity_features[:, :, 19:20] * 40.0 * math.pi / 180.0
-        obs_speed = obs_speed[:, :, None, :].expand(B, E, K, 1)
         obs_turn = obs_turn[:, :, None, :].expand(B, E, K, 1)
         physical_evidence = evidence_mask[:, :, None, None]
         speed = torch.where(physical_evidence > 0.5, obs_speed, state.speed)
         turn_limit = torch.where(physical_evidence > 0.5, obs_turn, state.turn_limit)
 
-        supplied_age = evidence_meta[:, :, 0:1] * c.max_age
         age_new = torch.where(
             evidence_mask[:, :, None] > 0.5,
             supplied_age,
@@ -412,36 +428,46 @@ class PIActor(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         c = self.config
         B, A, H, _ = action_pos.shape
-        E = c.n_entities
-        mean_pos = (future_pos * mode_probs[:, :, :, None, None]).sum(dim=2)
-        category = self.entity_category[None, None, :, :].expand(B, A, E, 3)
-        context = state.info_context[:, None, None, :].expand(B, A, E, -1)
+        E, K = c.n_entities, c.n_hypotheses
+        category = self.entity_category[None, None, :, None, :].expand(B, A, E, K, 3)
+        context = state.info_context[:, None, None, None, :].expand(B, A, E, K, -1)
         age = state.age.squeeze(-1)[:, None, :].expand(B, A, E)
         known = state.known.squeeze(-1)
         dispersion = self._base_dispersion(future_pos, mode_probs)
+        mode_weight = mode_probs[:, None, :, :].expand(B, A, E, K)
 
         age_steps, uncertainty_steps = [], []
         q_obs_steps, q_com_steps, q_refresh_steps = [], [], []
+        q_obs_hyp_steps, q_com_hyp_steps, q_refresh_hyp_steps = [], [], []
         current_u = dispersion[:, :, 0][:, None, :].expand(B, A, E).clone()
         dispersion_gain = F.softplus(self._dispersion_gain)
         age_gain = F.softplus(self._age_gain)
         reset_u = torch.sigmoid(self._reset_uncertainty_logit) * 0.10
 
         for h in range(H):
-            entity = mean_pos[:, None, :, h, :].expand(B, A, E, 2)
-            own = action_pos[:, :, h, :][:, :, None, :].expand(B, A, E, 2)
+            # Keep the K physical futures separate until after observation and
+            # communication refresh have been estimated.  Averaging positions
+            # first can create a fictitious target location that corresponds to
+            # none of the hypotheses.
+            entity = future_pos[:, None, :, :, h, :].expand(B, A, E, K, 2)
+            own = action_pos[:, :, h, :][:, :, None, None, :].expand(B, A, E, K, 2)
             delta = entity - own
             dist = torch.linalg.vector_norm(delta, dim=-1, keepdim=True)
-            own_yaw = action_yaw[:, :, h, :][:, :, None, :].expand(B, A, E, 1)
+            own_yaw = action_yaw[:, :, h, :][:, :, None, None, :].expand(B, A, E, K, 1)
             heading = torch.cat([torch.sin(own_yaw), torch.cos(own_yaw)], dim=-1)
-            age_norm = (age / c.max_age).clamp(0.0, 1.0)[..., None]
+            age_norm = (age / c.max_age).clamp(0.0, 1.0)[:, :, :, None, None]
+            age_norm = age_norm.expand(B, A, E, K, 1)
             info_input = torch.cat([delta, dist, heading, category, age_norm, context], dim=-1)
-            q_obs = torch.sigmoid(self.observe_predictor(info_input)).squeeze(-1)
-            q_com = torch.sigmoid(self.communicate_predictor(info_input)).squeeze(-1)
-            known_a = known[:, None, :].expand(B, A, E)
-            q_obs = q_obs * known_a
-            q_com = q_com * known_a
-            q_refresh = 1.0 - (1.0 - q_obs) * (1.0 - q_com)
+            q_obs_hyp = torch.sigmoid(self.observe_predictor(info_input)).squeeze(-1)
+            q_com_hyp = torch.sigmoid(self.communicate_predictor(info_input)).squeeze(-1)
+            known_hyp = known[:, None, :, None].expand(B, A, E, K)
+            q_obs_hyp = q_obs_hyp * known_hyp
+            q_com_hyp = q_com_hyp * known_hyp
+            q_refresh_hyp = 1.0 - (1.0 - q_obs_hyp) * (1.0 - q_com_hyp)
+
+            q_obs = (mode_weight * q_obs_hyp).sum(dim=3)
+            q_com = (mode_weight * q_com_hyp).sum(dim=3)
+            q_refresh = (mode_weight * q_refresh_hyp).sum(dim=3)
 
             age = (1.0 - q_refresh) * (age + 1.0)
             disp_h = dispersion[:, :, h][:, None, :].expand(B, A, E)
@@ -453,6 +479,9 @@ class PIActor(nn.Module):
             q_obs_steps.append(q_obs)
             q_com_steps.append(q_com)
             q_refresh_steps.append(q_refresh)
+            q_obs_hyp_steps.append(q_obs_hyp)
+            q_com_hyp_steps.append(q_com_hyp)
+            q_refresh_hyp_steps.append(q_refresh_hyp)
 
         return {
             "expected_age": torch.stack(age_steps, dim=-1),
@@ -460,6 +489,9 @@ class PIActor(nn.Module):
             "q_obs": torch.stack(q_obs_steps, dim=-1),
             "q_com": torch.stack(q_com_steps, dim=-1),
             "q_refresh": torch.stack(q_refresh_steps, dim=-1),
+            "q_obs_hypothesis": torch.stack(q_obs_hyp_steps, dim=-1),
+            "q_com_hypothesis": torch.stack(q_com_hyp_steps, dim=-1),
+            "q_refresh_hypothesis": torch.stack(q_refresh_hyp_steps, dim=-1),
         }
 
     def _interaction_lattice(
@@ -488,7 +520,7 @@ class PIActor(nn.Module):
         age = (info["expected_age"] / c.max_age).clamp(0.0, 1.0)[:, :, :, None, :, None]
         age = age.expand(B, A, E, K, H, 1)
         uncertainty = info["uncertainty"][:, :, :, None, :, None].expand(B, A, E, K, H, 1)
-        refresh = info["q_refresh"][:, :, :, None, :, None].expand(B, A, E, K, H, 1)
+        refresh = info["q_refresh_hypothesis"][..., None]
         category = self.entity_category[None, None, :, None, None, :].expand(B, A, E, K, H, 3)
         known = state.known[:, None, :, None, None, :].expand(B, A, E, K, H, 1)
         alive = state.alive[:, None, :, None, None, :].expand(B, A, E, K, H, 1)
