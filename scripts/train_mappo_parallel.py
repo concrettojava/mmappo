@@ -19,6 +19,7 @@ the single-environment reference trainer.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import random
@@ -40,6 +41,17 @@ def choose_device(name: str) -> str:
     if name != "auto":
         return name
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 def encode_batch(vectorizer, observations, states, finished):
@@ -97,7 +109,6 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-    # On Ampere+ this permits TF32 internally for eligible float32 GEMMs.
     torch.set_float32_matmul_precision("high")
 
     device = choose_device(args.device)
@@ -142,11 +153,10 @@ def main():
     recent_returns = []
     processed = start_episode
     run_start = time.perf_counter()
+    last_log_time = run_start
     last_log_episode = processed
 
     while processed < args.episodes:
-        # Do not cross a requested checkpoint boundary; this keeps filenames at
-        # exact 500/1000/... episode numbers even when num_envs is not a divisor.
         next_save = ((processed // args.save_every) + 1) * args.save_every
         batch_envs = min(
             args.num_envs,
@@ -223,19 +233,38 @@ def main():
         with metrics_path.open("a", encoding="utf-8") as f:
             f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
 
-        previous = processed
         processed += batch_envs
 
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
-            elapsed = now - run_start
-            eps_per_sec = (processed - start_episode) / max(elapsed, 1e-9)
+            elapsed = max(now - run_start, 1e-9)
+            trained = processed - start_episode
+            speed = trained / elapsed
+            sec_per_ep = elapsed / max(trained, 1)
+            window_eps = max(1, processed - last_log_episode)
+            window_time = now - last_log_time
+            remaining = max(0, args.episodes - processed)
+            eta_seconds = remaining / speed if speed > 0 else 0.0
+            finish = datetime.now() + timedelta(seconds=eta_seconds)
+            percent = 100.0 * processed / args.episodes
+            last = records[-1]
+            batch_completion = float(np.mean([i["completion_ratio"] for i in final_infos]))
+            batch_survival = float(np.mean([i["survival_ratio"] for i in final_infos]))
+
             print(
-                f"ep={processed:6d} avg100={np.mean(recent_returns):9.3f} "
-                f"batch_completion={np.mean([i['completion_ratio'] for i in final_infos]):.3f} "
-                f"batch_survival={np.mean([i['survival_ratio'] for i in final_infos]):.3f} "
-                f"actor={losses['actor_loss']:.4f} critic={losses['critic_loss']:.4f} "
-                f"speed={eps_per_sec:.3f} ep/s"
+                f"[{processed:5d}/{args.episodes:<5d} {percent:6.2f}%]  "
+                f"return={last['mean_return']:9.3f}  avg100={np.mean(recent_returns):9.3f}  "
+                f"steps={last['steps']:3d}  completion={last['completion_ratio']:.3f}  "
+                f"survival={last['survival_ratio']:.3f}  actor={losses['actor_loss']:.4f}  "
+                f"critic={losses['critic_loss']:.4f}"
             )
+            print(
+                f"    batch completion={batch_completion:.3f} survival={batch_survival:.3f}  |  "
+                f"speed={speed:.3f} ep/s ({sec_per_ep:.2f}s/ep)  |  "
+                f"last{window_eps}={format_duration(window_time)}  |  "
+                f"elapsed={format_duration(elapsed)}  |  ETA={format_duration(eta_seconds)}  |  "
+                f"finish≈{finish:%H:%M:%S}"
+            )
+            last_log_time = time.perf_counter()
             last_log_episode = processed
 
         if processed % args.save_every == 0 or processed == args.episodes:
