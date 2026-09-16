@@ -7,32 +7,8 @@ from .scenario import reset_scene
 from . import dynamics, communication, combat, observation, state, reward
 
 class CooperativeUAVEnv:
-    """
-    Scene-level reproduction of Wang et al., FOFE-MMAPPO paper.
+    """Scene-level reproduction of Wang et al., FOFE-MMAPPO paper."""
 
-    Scope:
-      - 4 km x 4 km battlefield
-      - 8 heterogeneous RSUAVs
-      - 4 moving targets
-      - 3 fixed threat areas
-      - communication topology + multi-hop subgroups
-      - local detection + observation sharing
-      - automatic strike
-      - collision destruction
-      - probabilistic threat destruction
-      - paper reward Eqs. (11)-(17)
-      - 1 s step, 200-step episode
-
-    This file intentionally does NOT implement MAPPO/FOFE/Mamba yet.
-
-    Coordinate convention:
-      The paper's Table 2 says yaw=0 means Heading North, but Eq.(5) writes
-      xdot=v*cos(yaw), ydot=v*sin(yaw), which would mean yaw=0 points East.
-      To match Fig.7 / "enter from the south", this reproduction uses:
-          xdot = v*sin(yaw), ydot = v*cos(yaw)
-      so yaw=0 points North.
-      Set paper_equation_yaw=True to instead follow Eq.(5) literally.
-    """
     def __init__(
         self,
         seed: int = 0,
@@ -58,13 +34,26 @@ class CooperativeUAVEnv:
         self.targets: List[Target] = []
         self.threats: List[Threat] = []
         self.step_count = 0
+        self._geometry_cache = None
 
     def reset(self, seed: int | None = None):
+        self._geometry_cache = None
         reset_scene(self, seed)
         return self.get_observations(), self.get_global_state()
 
-    @staticmethod
-    def _dist(a, b):
+    def _dist(self, a, b):
+        cache = self._geometry_cache
+        if cache is not None:
+            if isinstance(a, UAV) and isinstance(b, UAV):
+                return float(cache["uav_uav"][a.idx, b.idx])
+            if isinstance(a, UAV) and isinstance(b, Target):
+                return float(cache["uav_target"][a.idx, b.idx])
+            if isinstance(a, Target) and isinstance(b, UAV):
+                return float(cache["uav_target"][b.idx, a.idx])
+            if isinstance(a, UAV) and isinstance(b, Threat):
+                return float(cache["uav_threat"][a.idx, b.idx])
+            if isinstance(a, Threat) and isinstance(b, UAV):
+                return float(cache["uav_threat"][b.idx, a.idx])
         return dynamics._dist(a, b)
 
     @staticmethod
@@ -113,23 +102,24 @@ class CooperativeUAVEnv:
     def get_global_state(self):
         return state.get_global_states(self)
 
-    def step(self, action_indices):
-        """Advance one second and return observation, state, reward, done, info.
+    def prepare_step(self, action_indices):
+        """Apply movement only, returning context needed to finish the step.
 
-        Reward shaping needs the post-maneuver geometry before automatic combat
-        effects.  A reward context is therefore captured after UAV/target motion
-        and detection, then strike/collision/threat damage is resolved, and the
-        final Eq. (17) reward is evaluated with post-transition mission status.
+        Parallel training uses this split so all environments can move first,
+        then one batched geometry calculation can be shared by reward/combat.
+        ``step`` still uses the same two phases for reference behavior.
         """
         if len(action_indices) != len(self.uavs):
             raise ValueError(f"Expected {len(self.uavs)} actions, got {len(action_indices)}")
-
         previous_action_u = {u.idx: float(u.last_action_u) for u in self.uavs}
-
+        self._geometry_cache = None
         self.step_count += 1
         self._update_uavs(action_indices)
         self._update_targets()
+        return previous_action_u
 
+    def finish_step(self, previous_action_u):
+        """Resolve detection, combat, reward, termination and observations."""
         reward_ctx = reward.build_reward_context(self, previous_action_u)
         shared = {
             uid: (
@@ -144,10 +134,7 @@ class CooperativeUAVEnv:
         threat_dead = self._apply_threat_damage()
         newly_destroyed = set(collision_dead) | set(threat_dead)
 
-        rewards, reward_breakdown = reward.compute_rewards(
-            self, reward_ctx, newly_destroyed
-        )
-
+        rewards, reward_breakdown = reward.compute_rewards(self, reward_ctx, newly_destroyed)
         done = (
             self.step_count >= self.max_steps
             or all(not t.alive for t in self.targets)
@@ -166,3 +153,7 @@ class CooperativeUAVEnv:
             "reward_breakdown": reward_breakdown,
         }
         return self.get_observations(), self.get_global_state(), rewards, done, info
+
+    def step(self, action_indices):
+        previous_action_u = self.prepare_step(action_indices)
+        return self.finish_step(previous_action_u)
