@@ -54,6 +54,16 @@ class ParallelRolloutBuffer:
         }
 
     def compute_gae(self, gamma: float, gae_lambda: float):
+        """Compute GAE independently for each environment and agent.
+
+        ``dones[t, e, i]`` describes the transition stored at time t: it is
+        one if that agent is terminal after receiving ``rewards[t, e, i]``.
+        Therefore the bootstrap/recursive term at t must be masked by
+        ``dones[t]`` itself, not by ``dones[t+1]``.
+
+        Parallel batches are complete episodes in the current trainer, so the
+        value after the final stored transition is zero.
+        """
         data = self.as_arrays()
         rewards = data["rewards"]
         values = data["values"]
@@ -66,17 +76,19 @@ class ParallelRolloutBuffer:
         advantages = np.zeros_like(rewards, dtype=np.float32)
         gae = np.zeros((E, N), dtype=np.float32)
         next_values = np.zeros((E, N), dtype=np.float32)
-        next_dones = np.ones((E, N), dtype=np.float32)
 
         for t in reversed(range(T)):
-            nonterminal = 1.0 - next_dones
+            # done[t] belongs to the transition t -> t+1.  Using a shifted
+            # done mask here would incorrectly cut returns one step too early.
+            nonterminal = 1.0 - dones[t]
             delta = rewards[t] + gamma * next_values * nonterminal - values[t]
             gae = delta + gamma * gae_lambda * nonterminal * gae
-            # Entries after an environment has already terminated are padding.
+
+            # Timesteps after an environment/agent has already terminated are
+            # padding in the synchronized parallel rollout.
             gae *= active[t]
             advantages[t] = gae
             next_values = values[t]
-            next_dones = dones[t]
 
         data["advantages"] = advantages
         data["returns"] = advantages + values
