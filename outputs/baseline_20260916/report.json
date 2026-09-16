@@ -1,0 +1,76 @@
+{
+  "python": "3.12.3",
+  "numpy": "2.5.3",
+  "matplotlib": "3.11.2",
+  "source_sha256": {
+    "uav_env.py": "bc7a745f3acaa0aa1d0f1304ade6880df75616083a9581be1155b809a6055e98",
+    "scene_visual_v5.py": "86d5d37f46872c9aa69d78b7ad69f025da94167bc323802c21e09908fd976fd6",
+    "demo_env.py": "fd15b2a09d21ba1b55b5c97b7afff01c38db48cce76c859bb0bb1702faccb5ac",
+    "requirements.txt": "6d4cdf924e8b6fe2cf827f647ca740148e2e8b4c44ea31578dbea46cbd403417",
+    "scene_demo.png": "9ae3bc5f411dcb0a717f888812bdd619780452fbef75f435d63502949bec5556"
+  },
+  "deterministic_cases": 6,
+  "visual_steps": 50,
+  "episodes": {
+    "seed0_straight": {
+      "step": 200,
+      "strikes": [],
+      "collision_dead": [],
+      "threat_dead": [],
+      "alive_uavs": 4,
+      "alive_targets": 3,
+      "completion_ratio": 0.25,
+      "survival_ratio": 0.5
+    },
+    "seed0_random": {
+      "step": 200,
+      "strikes": [],
+      "collision_dead": [],
+      "threat_dead": [],
+      "alive_uavs": 6,
+      "alive_targets": 3,
+      "completion_ratio": 0.25,
+      "survival_ratio": 0.75
+    },
+    "seed7_straight": {
+      "step": 200,
+      "strikes": [],
+      "collision_dead": [],
+      "threat_dead": [],
+      "alive_uavs": 2,
+      "alive_targets": 3,
+      "completion_ratio": 0.25,
+      "survival_ratio": 0.25
+    },
+    "seed7_random": {
+      "step": 200,
+      "strikes": [],
+      "collision_dead": [],
+      "threat_dead": [],
+      "alive_uavs": 6,
+      "alive_targets": 3,
+      "completion_ratio": 0.25,
+      "survival_ratio": 0.75
+    },
+    "seed42_straight": {
+      "step": 200,
+      "strikes": [],
+      "collision_dead": [],
+      "threat_dead": [],
+      "alive_uavs": 4,
+      "alive_targets": 3,
+      "completion_ratio": 0.25,
+      "survival_ratio": 0.5
+    },
+    "seed42_random": {
+      "step": 200,
+      "strikes": [],
+      "collision_dead": [],
+      "threat_dead": [],
+      "alive_uavs": 6,
+      "alive_targets": 2,
+      "completion_ratio": 0.5,
+      "survival_ratio": 0.75
+    }
+  }
+}

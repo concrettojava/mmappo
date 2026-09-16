@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+outputs/checks/
+outputs/paper_review/
+outputs/figures/
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
