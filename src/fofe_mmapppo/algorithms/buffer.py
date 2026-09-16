@@ -45,24 +45,27 @@ class RolloutBuffer:
             "active": np.asarray(self.active, dtype=np.float32),
         }
 
-    def compute_gae(self, gamma: float, gae_lambda: float, last_values=None, last_dones=None):
+    def compute_gae(self, gamma: float, gae_lambda: float, last_values=None):
+        """Compute generalized advantage estimation independently per agent.
+
+        ``dones[t, i]`` describes the transition stored at t: it is one when
+        agent i is terminal after receiving ``rewards[t, i]``.  This includes
+        both episode termination and an individual UAV being destroyed.
+        """
         data = self.as_arrays()
         rewards, values, dones = data["rewards"], data["values"], data["dones"]
         T, N = rewards.shape
         last_values = np.zeros(N, dtype=np.float32) if last_values is None else np.asarray(last_values, dtype=np.float32)
-        last_dones = np.ones(N, dtype=np.float32) if last_dones is None else np.asarray(last_dones, dtype=np.float32)
 
         advantages = np.zeros_like(rewards, dtype=np.float32)
         gae = np.zeros(N, dtype=np.float32)
         next_values = last_values
-        next_dones = last_dones
         for t in reversed(range(T)):
-            nonterminal = 1.0 - next_dones
+            nonterminal = 1.0 - dones[t]
             delta = rewards[t] + gamma * next_values * nonterminal - values[t]
             gae = delta + gamma * gae_lambda * nonterminal * gae
             advantages[t] = gae
             next_values = values[t]
-            next_dones = dones[t]
 
         returns = advantages + values
         data["advantages"] = advantages
