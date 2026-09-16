@@ -5,7 +5,8 @@ from .critic import MLPCritic
 from .vectorizer import FixedVectorizer
 from .direct_vectorizer import DirectFixedVectorizer
 from .entity_tensorizer import EntityBatch, EntityTensorizer
-from .pi_actor import PIActor, PIActorConfig, PIBeliefState
+from .pi_actor import PIActorConfig, PIBeliefState
+from .pi_actor_optimized import PIActor
 
 __all__ = [
     "MLPActor",
