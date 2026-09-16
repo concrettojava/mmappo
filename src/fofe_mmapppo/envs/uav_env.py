@@ -41,6 +41,12 @@ class CooperativeUAVEnv:
         reset_scene(self, seed)
         return self.get_observations(), self.get_global_state()
 
+    def reset_vectors(self, vectorizer, seed: int | None = None):
+        """Reset and return fixed vectors without structured observation/state objects."""
+        self._geometry_cache = None
+        reset_scene(self, seed)
+        return vectorizer.encode_env(self)
+
     def _dist(self, a, b):
         cache = self._geometry_cache
         if cache is not None:
@@ -103,12 +109,7 @@ class CooperativeUAVEnv:
         return state.get_global_states(self)
 
     def prepare_step(self, action_indices):
-        """Apply movement only, returning context needed to finish the step.
-
-        Parallel training uses this split so all environments can move first,
-        then one batched geometry calculation can be shared by reward/combat.
-        ``step`` still uses the same two phases for reference behavior.
-        """
+        """Apply movement only, returning context needed to finish the step."""
         if len(action_indices) != len(self.uavs):
             raise ValueError(f"Expected {len(self.uavs)} actions, got {len(action_indices)}")
         previous_action_u = {u.idx: float(u.last_action_u) for u in self.uavs}
@@ -118,8 +119,8 @@ class CooperativeUAVEnv:
         self._update_targets()
         return previous_action_u
 
-    def finish_step(self, previous_action_u):
-        """Resolve detection, combat, reward, termination and observations."""
+    def _resolve_step(self, previous_action_u):
+        """Resolve detection/combat/reward and return rewards, done and info."""
         reward_ctx = reward.build_reward_context(self, previous_action_u)
         shared = {
             uid: (
@@ -141,19 +142,36 @@ class CooperativeUAVEnv:
             or all(not u.alive for u in self.uavs)
         )
 
+        alive_uavs = sum(u.alive for u in self.uavs)
+        alive_targets = sum(t.alive for t in self.targets)
         info = {
             "step": self.step_count,
             "strikes": strikes,
             "collision_dead": sorted(collision_dead),
             "threat_dead": sorted(threat_dead),
-            "alive_uavs": sum(u.alive for u in self.uavs),
-            "alive_targets": sum(t.alive for t in self.targets),
-            "completion_ratio": 1.0 - sum(t.alive for t in self.targets) / len(self.targets),
-            "survival_ratio": sum(u.alive for u in self.uavs) / len(self.uavs),
+            "alive_uavs": alive_uavs,
+            "alive_targets": alive_targets,
+            "completion_ratio": 1.0 - alive_targets / len(self.targets),
+            "survival_ratio": alive_uavs / len(self.uavs),
             "reward_breakdown": reward_breakdown,
         }
+        return rewards, done, info
+
+    def finish_step(self, previous_action_u):
+        """Reference path: resolve step then materialize structured outputs."""
+        rewards, done, info = self._resolve_step(previous_action_u)
         return self.get_observations(), self.get_global_state(), rewards, done, info
+
+    def finish_step_vectors(self, previous_action_u, vectorizer):
+        """Training path: resolve step then directly emit fixed arrays."""
+        rewards, done, info = self._resolve_step(previous_action_u)
+        obs_vec, state_vec, active = vectorizer.encode_env(self)
+        return obs_vec, state_vec, active, rewards, done, info
 
     def step(self, action_indices):
         previous_action_u = self.prepare_step(action_indices)
         return self.finish_step(previous_action_u)
+
+    def step_vectors(self, action_indices, vectorizer):
+        previous_action_u = self.prepare_step(action_indices)
+        return self.finish_step_vectors(previous_action_u, vectorizer)
