@@ -1,13 +1,28 @@
 from __future__ import annotations
 import math
-import numpy as np
 from typing import List
+import numpy as np
 from .entities import UAV, Target, Threat
 from .scenario import reset_scene
 from . import dynamics, communication, combat, observation, state, reward
 
+
+SCENARIOS = ("reference", "contested")
+
+
 class CooperativeUAVEnv:
-    """Scene-level reproduction of Wang et al., FOFE-MMAPPO paper."""
+    """Scene-level reproduction plus an optional contested-information scenario.
+
+    ``reference`` preserves the reproduced Wang et al. scenario.
+
+    ``contested`` keeps the same mission, reward and action space but adds
+    spatially and temporally varying electromagnetic interference plus evasive
+    target motion.  The interference degrades communication and reconnaissance
+    ranges without exposing jammer state to the baseline policy.  This creates
+    intermittent local observations/topology fragmentation while preserving the
+    same fixed-vector dimensions, so the existing MAPPO baseline is a fair
+    capacity probe rather than a new algorithm.
+    """
 
     def __init__(
         self,
@@ -19,7 +34,19 @@ class CooperativeUAVEnv:
         target_turn_accel_std_deg_s2: float = 0.6,
         threat_eta: float = 1.8,
         paper_equation_yaw: bool = False,
+        scenario: str = "reference",
+        jammer_count: int = 2,
+        jammer_min_radius: float = 700.0,
+        jammer_max_radius: float = 1000.0,
+        jammer_min_strength: float = 0.55,
+        jammer_max_strength: float = 0.75,
+        contested_min_comm_factor: float = 0.30,
+        contested_min_recon_factor: float = 0.55,
+        evasive_trigger_range: float = 700.0,
+        evasive_turn_rate_deg_s: float = 10.0,
     ):
+        if scenario not in SCENARIOS:
+            raise ValueError(f"unknown scenario={scenario!r}; expected one of {SCENARIOS}")
         self.rng = np.random.default_rng(seed)
         self.seed = seed
         self.world_size = float(world_size)
@@ -29,12 +56,63 @@ class CooperativeUAVEnv:
         self.target_turn_accel_std = math.radians(target_turn_accel_std_deg_s2)
         self.threat_eta = float(threat_eta)
         self.paper_equation_yaw = paper_equation_yaw
+        self.scenario = scenario
+
+        self.jammer_count = int(jammer_count)
+        self.jammer_min_radius = float(jammer_min_radius)
+        self.jammer_max_radius = float(jammer_max_radius)
+        self.jammer_min_strength = float(jammer_min_strength)
+        self.jammer_max_strength = float(jammer_max_strength)
+        self.contested_min_comm_factor = float(contested_min_comm_factor)
+        self.contested_min_recon_factor = float(contested_min_recon_factor)
+        self.evasive_trigger_range = float(evasive_trigger_range)
+        self.evasive_turn_rate = math.radians(evasive_turn_rate_deg_s)
 
         self.uavs: List[UAV] = []
         self.targets: List[Target] = []
         self.threats: List[Threat] = []
+        self.jammers: list[dict] = []
         self.step_count = 0
         self._geometry_cache = None
+
+    @property
+    def contested(self) -> bool:
+        return self.scenario == "contested"
+
+    def jammer_intensity_at(self, x: float, y: float) -> float:
+        """Return deterministic aggregate interference intensity in [0, 1]."""
+        if not self.contested or not self.jammers:
+            return 0.0
+        # Different jammer periods/phases create topology changes even for a
+        # stationary formation.  No RNG is consumed here, so repeated graph/
+        # observation calls within a step are exactly consistent.
+        total_survival = 1.0
+        for j in self.jammers:
+            dx = float(x) - j["x"]
+            dy = float(y) - j["y"]
+            d2 = dx * dx + dy * dy
+            spatial = math.exp(-d2 / max(j["radius"] * j["radius"], 1.0))
+            temporal = 0.65 + 0.35 * math.sin(
+                2.0 * math.pi * self.step_count / j["period"] + j["phase"]
+            )
+            local = float(np.clip(j["strength"] * spatial * temporal, 0.0, 0.95))
+            total_survival *= 1.0 - local
+        return float(np.clip(1.0 - total_survival, 0.0, 0.95))
+
+    def communication_factor(self, uav: UAV) -> float:
+        if not self.contested:
+            return 1.0
+        intensity = self.jammer_intensity_at(uav.x, uav.y)
+        return float(max(self.contested_min_comm_factor, 1.0 - intensity))
+
+    def reconnaissance_factor(self, uav: UAV) -> float:
+        if not self.contested:
+            return 1.0
+        intensity = self.jammer_intensity_at(uav.x, uav.y)
+        # Sensing degrades more gently than communication; otherwise the task
+        # becomes an artificial blackout rather than an information-freshness
+        # problem.
+        return float(max(self.contested_min_recon_factor, 1.0 - 0.60 * intensity))
 
     def reset(self, seed: int | None = None):
         self._geometry_cache = None
@@ -154,6 +232,7 @@ class CooperativeUAVEnv:
             "completion_ratio": 1.0 - alive_targets / len(self.targets),
             "survival_ratio": alive_uavs / len(self.uavs),
             "reward_breakdown": reward_breakdown,
+            "scenario": self.scenario,
         }
         return rewards, done, info
 
