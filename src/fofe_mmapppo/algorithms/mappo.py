@@ -34,6 +34,7 @@ class MAPPOConfig:
     value_coef: float = 0.5
     max_grad_norm: float = 0.5
     minibatch_size: int = 64
+    fused_adam: bool = True
 
 
 class MAPPO:
@@ -54,16 +55,20 @@ class MAPPO:
             for _ in range(self.n_agents)
         ]).to(self.device)
 
+        adam_kwargs = {
+            "lr": self.config.learning_rate,
+            "fused": bool(self.config.fused_adam and self.device.type == "cuda"),
+        }
         self.actor_optimizers = [
-            torch.optim.Adam(actor.parameters(), lr=self.config.learning_rate)
+            torch.optim.Adam(actor.parameters(), **adam_kwargs)
             for actor in self.actors
         ]
         self.critic_optimizers = [
-            torch.optim.Adam(critic.parameters(), lr=self.config.learning_rate)
+            torch.optim.Adam(critic.parameters(), **adam_kwargs)
             for critic in self.critics
         ]
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def act(self, obs_vectors: np.ndarray, state_vectors: np.ndarray,
             active: np.ndarray, deterministic: bool = False):
         actions = np.full(self.n_agents, 3, dtype=np.int64)
@@ -82,7 +87,7 @@ class MAPPO:
             values[i] = float(value.item())
         return actions, log_probs, values
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def act_batch(self, obs_vectors: np.ndarray, state_vectors: np.ndarray,
                   active: np.ndarray, deterministic: bool = False):
         """Batched inference across environments.
@@ -113,7 +118,7 @@ class MAPPO:
             values[env_idx, i] = value.cpu().numpy()
         return actions, log_probs, values
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def values(self, state_vectors: np.ndarray, active: np.ndarray):
         values = np.zeros(self.n_agents, dtype=np.float32)
         for i in range(self.n_agents):
