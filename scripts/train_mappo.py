@@ -39,7 +39,10 @@ def choose_device(name: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Train fixed-vector MAPPO baseline")
-    parser.add_argument("--episodes", type=int, default=32000)
+    parser.add_argument("--episodes", type=int, default=32000,
+                        help="target total episode count; with --resume, continue until this episode")
+    parser.add_argument("--resume", type=Path,
+                        help="resume from checkpoint; old checkpoints restore model weights, newer ones also restore Adam state")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto", help="auto/cpu/cuda/cuda:0")
     parser.add_argument("--hidden-dim", type=int, default=256)
@@ -59,43 +62,75 @@ def main():
 
     device = choose_device(args.device)
     env = CooperativeUAVEnv(seed=args.seed)
-    vectorizer = FixedVectorizer(
-        world_size=env.world_size,
-        n_uavs=len(env.uavs) or 8,
-        n_targets=4,
-        n_threats=3,
-    )
-    config = MAPPOConfig(hidden_dim=args.hidden_dim, minibatch_size=args.minibatch_size)
+
+    resume_checkpoint = None
+    start_episode = 1
+    if args.resume is not None:
+        if not args.resume.exists():
+            parser.error(f"resume checkpoint not found: {args.resume}")
+        resume_checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        completed_episode = int(resume_checkpoint.get("episode", 0))
+        if args.episodes <= completed_episode:
+            parser.error(
+                f"--episodes is the target total episode count and must be > checkpoint episode "
+                f"({completed_episode})"
+            )
+        start_episode = completed_episode + 1
+
+    if resume_checkpoint is not None and resume_checkpoint.get("vectorizer"):
+        vectorizer = FixedVectorizer(**resume_checkpoint["vectorizer"])
+    else:
+        vectorizer = FixedVectorizer(
+            world_size=env.world_size,
+            n_uavs=len(env.uavs) or 8,
+            n_targets=4,
+            n_threats=3,
+        )
+
+    if resume_checkpoint is not None and resume_checkpoint.get("config"):
+        config = MAPPOConfig(**resume_checkpoint["config"])
+    else:
+        config = MAPPOConfig(hidden_dim=args.hidden_dim, minibatch_size=args.minibatch_size)
+
+    n_agents = int(resume_checkpoint.get("n_agents", 8)) if resume_checkpoint else 8
+    action_dim = int(resume_checkpoint.get("action_dim", 7)) if resume_checkpoint else 7
     learner = MAPPO(
         vectorizer.observation_dim,
         vectorizer.state_dim,
-        n_agents=8,
-        action_dim=7,
+        n_agents=n_agents,
+        action_dim=action_dim,
         config=config,
         device=device,
     )
+
+    if resume_checkpoint is not None:
+        restored_optimizer = learner.load_checkpoint(resume_checkpoint, load_optimizers=True)
+        print(
+            f"resumed={args.resume} episode={start_episode - 1} "
+            f"optimizer_state={'restored' if restored_optimizer else 'not available; Adam restarted'}"
+        )
 
     args.output.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output / "metrics.jsonl"
     print(f"device={device} obs_dim={vectorizer.observation_dim} state_dim={vectorizer.state_dim}")
 
     recent_returns = []
-    for episode in range(1, args.episodes + 1):
+    for episode in range(start_episode, args.episodes + 1):
         obs, states = env.reset(seed=args.seed + episode - 1)
-        buffer = RolloutBuffer(n_agents=8)
-        episode_returns = np.zeros(8, dtype=np.float32)
+        buffer = RolloutBuffer(n_agents=n_agents)
+        episode_returns = np.zeros(n_agents, dtype=np.float32)
         final_info = None
 
         while True:
             obs_vec = vectorizer.batch_observations(obs)
             state_vec = vectorizer.batch_states(states)
-            active = np.asarray([obs[i] is not None for i in range(8)], dtype=np.float32)
+            active = np.asarray([obs[i] is not None for i in range(n_agents)], dtype=np.float32)
             actions, log_probs, values = learner.act(obs_vec, state_vec, active)
 
             next_obs, next_states, rewards, done, info = env.step(actions)
-            reward_vec = np.asarray([rewards[i] for i in range(8)], dtype=np.float32)
+            reward_vec = np.asarray([rewards[i] for i in range(n_agents)], dtype=np.float32)
             agent_dones = np.asarray(
-                [done or next_obs[i] is None for i in range(8)], dtype=np.float32
+                [done or next_obs[i] is None for i in range(n_agents)], dtype=np.float32
             )
 
             buffer.add(
@@ -131,7 +166,7 @@ def main():
         with metrics_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        if episode == 1 or episode % args.log_every == 0:
+        if episode == start_episode or episode % args.log_every == 0:
             print(
                 f"ep={episode:6d} return={mean_return:9.3f} "
                 f"avg100={np.mean(recent_returns):9.3f} steps={record['steps']:3d} "
@@ -142,7 +177,7 @@ def main():
         if episode % args.save_every == 0 or episode == args.episodes:
             torch.save(
                 {
-                    **learner.checkpoint(),
+                    **learner.checkpoint(include_optimizers=True),
                     "episode": episode,
                     "vectorizer": {
                         "world_size": vectorizer.world_size,
