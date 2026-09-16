@@ -1,13 +1,8 @@
 """High-throughput MAPPO training with multiple independent environments.
 
-This is an engineering acceleration path. The paper does not explicitly state
-that its 32 random environments are stepped as a vectorized training batch.
-The single-environment trainer remains the strict reference implementation.
-
-The parallel trainer uses a direct environment-to-fixed-vector rollout path so
-training does not materialize the flexible Eq. (8)/(9) dict/list observation
-objects and then immediately encode them back into arrays. The direct encoder is
-covered by parity tests against the structured reference representation.
+The parallel trainer is an engineering acceleration path. ``reference`` keeps
+the reproduced paper environment; ``contested`` uses the same MAPPO baseline in
+the new dynamic-interference/evasive-target scenario.
 """
 from __future__ import annotations
 
@@ -63,12 +58,13 @@ def status_text(processed, total, speed, sec_per_ep, elapsed):
     )
 
 
-def save_checkpoint(path, learner, vectorizer, episode, num_envs):
+def save_checkpoint(path, learner, vectorizer, episode, num_envs, scenario):
     torch.save(
         {
             **learner.checkpoint(include_optimizers=True),
             "episode": int(episode),
             "parallel_num_envs": int(num_envs),
+            "scenario": str(scenario),
             "vectorizer": {
                 "world_size": vectorizer.world_size,
                 "n_uavs": vectorizer.n_uavs,
@@ -86,6 +82,7 @@ def main():
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--scenario", choices=("reference", "contested"), default="reference")
     parser.add_argument("--num-envs", type=int, default=16)
     parser.add_argument("--minibatch-size", type=int, default=1024)
     parser.add_argument("--log-every", type=int, default=100)
@@ -107,7 +104,7 @@ def main():
     torch.set_float32_matmul_precision("high")
 
     device = choose_device(args.device)
-    probe = CooperativeUAVEnv(seed=args.seed)
+    probe = CooperativeUAVEnv(seed=args.seed, scenario=args.scenario)
     vectorizer = FixedVectorizer(
         world_size=probe.world_size,
         n_uavs=8,
@@ -121,6 +118,11 @@ def main():
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         start_episode = int(checkpoint.get("episode", 0))
+        checkpoint_scenario = str(checkpoint.get("scenario", "reference"))
+        if checkpoint_scenario != args.scenario:
+            parser.error(
+                f"checkpoint scenario={checkpoint_scenario!r} does not match --scenario={args.scenario!r}"
+            )
         cfg = MAPPOConfig(**checkpoint.get("config", {}))
         cfg.minibatch_size = args.minibatch_size
     else:
@@ -147,9 +149,9 @@ def main():
         atexit.register(writer.close)
 
     print(
-        f"device={device} num_envs={args.num_envs} minibatch={cfg.minibatch_size} "
-        f"obs_dim={vectorizer.observation_dim} state_dim={vectorizer.state_dim} "
-        f"rollout=direct-vector"
+        f"device={device} scenario={args.scenario} num_envs={args.num_envs} "
+        f"minibatch={cfg.minibatch_size} obs_dim={vectorizer.observation_dim} "
+        f"state_dim={vectorizer.state_dim} rollout=direct-vector"
     )
     if writer is not None:
         print(f"tensorboard={args.output / 'tensorboard'}")
@@ -169,14 +171,13 @@ def main():
             max(1, next_save - processed),
         )
         episode_ids = np.arange(processed + 1, processed + batch_envs + 1, dtype=np.int64)
-        envs = [CooperativeUAVEnv(seed=args.seed + int(ep) - 1) for ep in episode_ids]
+        envs = [
+            CooperativeUAVEnv(seed=args.seed + int(ep) - 1, scenario=args.scenario)
+            for ep in episode_ids
+        ]
 
-        obs_vec = np.zeros(
-            (batch_envs, 8, vectorizer.observation_dim), dtype=np.float32
-        )
-        state_vec = np.zeros(
-            (batch_envs, 8, vectorizer.state_dim), dtype=np.float32
-        )
+        obs_vec = np.zeros((batch_envs, 8, vectorizer.observation_dim), dtype=np.float32)
+        state_vec = np.zeros((batch_envs, 8, vectorizer.state_dim), dtype=np.float32)
         active = np.zeros((batch_envs, 8), dtype=np.float32)
         for e, (env, episode_id) in enumerate(zip(envs, episode_ids)):
             obs_vec[e], state_vec[e], active[e] = env.reset_vectors(
@@ -200,9 +201,7 @@ def main():
             for e, env in enumerate(envs):
                 if finished[e]:
                     continue
-                o, s, a, rewards, done, info = env.step_vectors(
-                    actions[e], direct_vectorizer
-                )
+                o, s, a, rewards, done, info = env.step_vectors(actions[e], direct_vectorizer)
                 next_obs[e] = o
                 next_state[e] = s
                 next_active[e] = a
@@ -243,6 +242,7 @@ def main():
             avg100 = float(np.mean(recent_returns))
             record = {
                 "episode": int(episode_id),
+                "scenario": args.scenario,
                 "mean_return": mean_return,
                 "steps": int(info["step"]),
                 "completion_ratio": float(info["completion_ratio"]),
@@ -254,12 +254,8 @@ def main():
             if writer is not None:
                 writer.add_scalar("train/mean_return", mean_return, episode_id)
                 writer.add_scalar("train/avg100_return", avg100, episode_id)
-                writer.add_scalar(
-                    "task/completion_ratio", record["completion_ratio"], episode_id
-                )
-                writer.add_scalar(
-                    "task/survival_ratio", record["survival_ratio"], episode_id
-                )
+                writer.add_scalar("task/completion_ratio", record["completion_ratio"], episode_id)
+                writer.add_scalar("task/survival_ratio", record["survival_ratio"], episode_id)
                 writer.add_scalar("task/episode_steps", record["steps"], episode_id)
 
         with metrics_path.open("a", encoding="utf-8") as f:
@@ -281,9 +277,7 @@ def main():
 
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
             last = records[-1]
-            batch_completion = float(
-                np.mean([i["completion_ratio"] for i in final_infos])
-            )
+            batch_completion = float(np.mean([i["completion_ratio"] for i in final_infos]))
             batch_survival = float(np.mean([i["survival_ratio"] for i in final_infos]))
             header.log(
                 f"ep={processed:6d} return={last['mean_return']:9.3f} "
@@ -294,9 +288,7 @@ def main():
                 f"critic={losses['critic_loss']:.4f}"
             )
             if writer is not None:
-                writer.add_scalar(
-                    "task/batch_completion_ratio", batch_completion, processed
-                )
+                writer.add_scalar("task/batch_completion_ratio", batch_completion, processed)
                 writer.add_scalar("task/batch_survival_ratio", batch_survival, processed)
                 writer.flush()
             if not header.enabled:
@@ -310,6 +302,7 @@ def main():
                 vectorizer,
                 processed,
                 args.num_envs,
+                args.scenario,
             )
 
     header.close()
