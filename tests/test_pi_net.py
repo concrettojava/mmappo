@@ -127,11 +127,26 @@ class PIActorTests(unittest.TestCase):
         self.assertEqual(tuple(aux["future_position"].shape), (self.B, 14, 3, 4, 2))
         self.assertEqual(tuple(aux["action_position"].shape), (self.B, 7, 4, 2))
         self.assertEqual(tuple(aux["q_refresh"].shape), (self.B, 7, 14, 4))
+        self.assertEqual(tuple(aux["q_refresh_hypothesis"].shape), (self.B, 7, 14, 3, 4))
         self.assertEqual(tuple(aux["uncertainty"].shape), (self.B, 7, 14, 4))
         self.assertEqual(tuple(aux["lattice"].shape), (self.B, 7, 14, 3, 4, 16))
         sums = aux["mode_probs"].sum(dim=-1)
         self.assertTrue(torch.allclose(sums, torch.ones_like(sums), atol=1e-6))
         self.assertTrue(((aux["q_refresh"] >= 0.0) & (aux["q_refresh"] <= 1.0)).all())
+
+    def test_information_refresh_is_aggregated_after_hypothesis_prediction(self):
+        _, _, aux = self.actor(
+            self.self_features, self.entities, self.mask, self.meta
+        )
+        weights = aux["mode_probs"][:, None, :, :, None]
+        expected_obs = (aux["q_obs_hypothesis"] * weights).sum(dim=3)
+        expected_com = (aux["q_com_hypothesis"] * weights).sum(dim=3)
+        expected_refresh = (aux["q_refresh_hypothesis"] * weights).sum(dim=3)
+        self.assertTrue(torch.allclose(aux["q_obs"], expected_obs, atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(aux["q_com"], expected_com, atol=1e-6, rtol=1e-6))
+        self.assertTrue(
+            torch.allclose(aux["q_refresh"], expected_refresh, atol=1e-6, rtol=1e-6)
+        )
 
     def test_missing_evidence_ages_belief_and_fresh_evidence_resets_it(self):
         _, state1, _ = self.actor(
@@ -153,6 +168,40 @@ class PIActorTests(unittest.TestCase):
             self.self_features, self.entities, self.mask, self.meta, state2
         )
         self.assertTrue(torch.allclose(state3.age[:, self.target_slot, 0], torch.zeros(self.B)))
+
+    def test_stale_evidence_is_dead_reckoned_to_current_time_before_correction(self):
+        stale_meta = self.meta.clone()
+        stale_age = 5.0
+        stale_meta[:, self.target_slot, 0] = stale_age / self.cfg.max_age
+        _, state, _ = self.actor(
+            self.self_features, self.entities, self.mask, stale_meta
+        )
+        # Target yaw=0 means north in this environment convention.  A 5-second
+        # old observation at y=.50 with target speed 8m/s should be aligned to
+        # y=.50 + 5*8/4000 = .51 before the first-seen correction.
+        expected_y = 0.50 + stale_age * 8.0 / self.cfg.world_size
+        target_position = state.position[:, self.target_slot]
+        self.assertTrue(
+            torch.allclose(
+                target_position[..., 0],
+                torch.full_like(target_position[..., 0], 0.50),
+                atol=1e-6,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                target_position[..., 1],
+                torch.full_like(target_position[..., 1], expected_y),
+                atol=1e-6,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                state.age[:, self.target_slot, 0],
+                torch.full((self.B,), stale_age),
+                atol=1e-6,
+            )
+        )
 
     def test_straight_action_primitive_respects_north_heading(self):
         pos, _ = self.actor._action_future(self.self_features[:1])
@@ -178,9 +227,9 @@ class PIActorTests(unittest.TestCase):
             self.self_features, self.entities, self.mask, self.meta
         )
         reset = state.reset_where(torch.tensor([True, False]))
-        self.assertEqual(float(reset.known[0].sum()), 0.0)
-        self.assertGreater(float(reset.known[1].sum()), 0.0)
-        self.assertEqual(float(reset.info_context[0].abs().sum()), 0.0)
+        self.assertEqual(reset.known[0].sum().detach().item(), 0.0)
+        self.assertGreater(reset.known[1].sum().detach().item(), 0.0)
+        self.assertEqual(reset.info_context[0].abs().sum().detach().item(), 0.0)
 
 
 if __name__ == "__main__":
