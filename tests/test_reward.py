@@ -19,6 +19,7 @@ from fofe_mmapppo.envs.reward import (
     build_reward_context,
     general_reward,
     mission_reward,
+    reconnaissance_reward,
     strike_reward,
 )
 
@@ -114,6 +115,41 @@ class AbilityRewardTests(unittest.TestCase):
         ctx = build_reward_context(self.env, {u.idx: 0.0})
         # -lambda_dist*200 + 10*1, with no same-type peer alive.
         self.assertAlmostEqual(strike_reward(self.env, u, ctx), 9.9, places=6)
+
+    def test_recon_effectiveness_keeps_target_and_threat_namespaces_distinct(self):
+        # Target IDs and threat IDs both start at zero in the implementation,
+        # but Eq. (14) takes the cardinality of two distinct mathematical sets.
+        # Detecting target 0 and threat 0 must therefore count as two objects.
+        for u in self.env.uavs[1:]:
+            u.alive = False
+        for t in self.env.targets[1:]:
+            t.alive = False
+
+        u = self.env.uavs[4]  # Rec-enhanced UAV
+        u.alive = True
+        u.x, u.y, u.yaw = 1000.0, 1000.0, 0.0
+
+        target = self.env.targets[0]
+        target.x, target.y = 1000.0, 1100.0
+
+        threat = self.env.threats[0]
+        threat.x, threat.y = 1100.0, 1000.0
+
+        # Keep the other two threats outside direct reconnaissance range.
+        self.env.threats[1].x, self.env.threats[1].y = 3500.0, 3500.0
+        self.env.threats[2].x, self.env.threats[2].y = 3600.0, 3600.0
+
+        ctx = build_reward_context(self.env, {u.idx: 0.0})
+        self.assertEqual(ctx.direct_targets[u.idx], {0})
+        self.assertEqual(ctx.direct_threats[u.idx], {0})
+
+        # Effectiveness numerator is 2, denominator is 1 live target + 3 threats.
+        effectiveness = general_reward(2, 4)
+        nearest = 100.0
+        expected_distance = -(1.0 / 2000.0) * nearest
+        expected_exclusion = 0.0
+        expected = expected_distance + effectiveness + expected_exclusion
+        self.assertAlmostEqual(reconnaissance_reward(self.env, u, ctx), expected, places=6)
 
 
 class EnvironmentIntegrationTests(unittest.TestCase):
