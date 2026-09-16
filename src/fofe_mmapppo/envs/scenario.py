@@ -15,6 +15,7 @@ INITIAL_UAVS = [
     (7, 2200.0, 100.0, "Com"),
 ]
 
+
 def reset_scene(env, seed: int | None = None):
     if seed is not None:
         env.seed = seed
@@ -40,3 +41,19 @@ def reset_scene(env, seed: int | None = None):
         y = float(env.rng.uniform(700.0, env.world_size - margin))
         radius = float(env.rng.uniform(120.0, 200.0))
         env.threats.append(Threat(k, x, y, radius))
+
+    # Scenario 2: jammer state is intentionally not exposed in the fixed-vector
+    # baseline observation.  It is a latent environmental disturbance that makes
+    # communication/reconnaissance quality spatially and temporally nonstationary.
+    env.jammers = []
+    if getattr(env, "contested", False):
+        for jid in range(env.jammer_count):
+            env.jammers.append({
+                "idx": jid,
+                "x": float(env.rng.uniform(650.0, env.world_size - 650.0)),
+                "y": float(env.rng.uniform(900.0, env.world_size - 500.0)),
+                "radius": float(env.rng.uniform(env.jammer_min_radius, env.jammer_max_radius)),
+                "strength": float(env.rng.uniform(env.jammer_min_strength, env.jammer_max_strength)),
+                "period": float(env.rng.uniform(45.0, 85.0)),
+                "phase": float(env.rng.uniform(-math.pi, math.pi)),
+            })
