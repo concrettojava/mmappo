@@ -10,11 +10,6 @@ Acceleration comes from:
 3. using much larger PPO mini-batches on GPU;
 4. enabling TF32-friendly float32 matmul precision on supported NVIDIA GPUs;
 5. reducing Python/file-I/O overhead in the training loop.
-
-Environment transitions themselves remain ordinary CooperativeUAVEnv.step()
-calls, so environment/reward semantics are unchanged.  Since multiple episodes
-are combined into one PPO update, optimization dynamics are not identical to
-the single-environment reference trainer.
 """
 from __future__ import annotations
 
@@ -37,6 +32,7 @@ from torch.utils.tensorboard import SummaryWriter
 from fofe_mmapppo.algorithms import MAPPO, MAPPOConfig, ParallelRolloutBuffer
 from fofe_mmapppo.envs import CooperativeUAVEnv
 from fofe_mmapppo.models import FixedVectorizer
+from fofe_mmapppo.terminal_status import FixedStatusHeader
 
 
 def choose_device(name: str) -> str:
@@ -54,6 +50,19 @@ def format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m{secs:02d}s"
     return f"{secs}s"
+
+
+def status_text(processed, total, speed, sec_per_ep, elapsed):
+    remaining = max(0, total - processed)
+    eta_seconds = remaining / speed if speed > 0 else 0.0
+    finish = datetime.now() + timedelta(seconds=eta_seconds)
+    percent = 100.0 * processed / max(total, 1)
+    return (
+        f"MAPPO  {processed}/{total}  {percent:6.2f}%  |  "
+        f"{speed:.3f} ep/s  {sec_per_ep:.2f}s/ep  |  "
+        f"elapsed {format_duration(elapsed)}  |  ETA {format_duration(eta_seconds)}  |  "
+        f"finish≈{finish:%H:%M:%S}"
+    )
 
 
 def encode_batch(vectorizer, observations, states, finished):
@@ -164,8 +173,9 @@ def main():
     recent_returns = []
     processed = start_episode
     run_start = time.perf_counter()
-    last_log_time = run_start
     last_log_episode = processed
+    header = FixedStatusHeader()
+    header.start("MAPPO starting...")
 
     while processed < args.episodes:
         next_save = ((processed // args.save_every) + 1) * args.save_every
@@ -254,11 +264,11 @@ def main():
             f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
 
         processed += batch_envs
-
         elapsed = max(now - run_start, 1e-9)
         trained = processed - start_episode
         speed = trained / elapsed
         sec_per_ep = elapsed / max(trained, 1)
+        header.update(status_text(processed, args.episodes, speed, sec_per_ep, elapsed))
 
         if writer is not None:
             writer.add_scalar("loss/actor", losses["actor_loss"], processed)
@@ -268,35 +278,22 @@ def main():
             writer.add_scalar("performance/active_num_envs", batch_envs, processed)
 
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
-            window_eps = max(1, processed - last_log_episode)
-            window_time = now - last_log_time
-            remaining = max(0, args.episodes - processed)
-            eta_seconds = remaining / speed if speed > 0 else 0.0
-            finish = datetime.now() + timedelta(seconds=eta_seconds)
-            percent = 100.0 * processed / args.episodes
             last = records[-1]
             batch_completion = float(np.mean([i["completion_ratio"] for i in final_infos]))
             batch_survival = float(np.mean([i["survival_ratio"] for i in final_infos]))
-
-            print(
-                f"[{processed:5d}/{args.episodes:<5d} {percent:6.2f}%]  "
-                f"return={last['mean_return']:9.3f}  avg100={np.mean(recent_returns):9.3f}  "
-                f"steps={last['steps']:3d}  completion={last['completion_ratio']:.3f}  "
-                f"survival={last['survival_ratio']:.3f}  actor={losses['actor_loss']:.4f}  "
+            header.log(
+                f"ep={processed:6d} return={last['mean_return']:9.3f} avg100={np.mean(recent_returns):9.3f} "
+                f"steps={last['steps']:3d} completion={last['completion_ratio']:.3f} "
+                f"survival={last['survival_ratio']:.3f} batch_c={batch_completion:.3f} "
+                f"batch_s={batch_survival:.3f} actor={losses['actor_loss']:.4f} "
                 f"critic={losses['critic_loss']:.4f}"
-            )
-            print(
-                f"    batch completion={batch_completion:.3f} survival={batch_survival:.3f}  |  "
-                f"speed={speed:.3f} ep/s ({sec_per_ep:.2f}s/ep)  |  "
-                f"last{window_eps}={format_duration(window_time)}  |  "
-                f"elapsed={format_duration(elapsed)}  |  ETA={format_duration(eta_seconds)}  |  "
-                f"finish≈{finish:%H:%M:%S}"
             )
             if writer is not None:
                 writer.add_scalar("task/batch_completion_ratio", batch_completion, processed)
                 writer.add_scalar("task/batch_survival_ratio", batch_survival, processed)
                 writer.flush()
-            last_log_time = time.perf_counter()
+            if not header.enabled:
+                header.plain_status_if_needed()
             last_log_episode = processed
 
         if processed % args.save_every == 0 or processed == args.episodes:
@@ -305,6 +302,7 @@ def main():
                 learner, vectorizer, processed, args.num_envs,
             )
 
+    header.close()
     if writer is not None:
         writer.flush()
         writer.close()
