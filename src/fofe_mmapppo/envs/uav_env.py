@@ -83,8 +83,8 @@ class CooperativeUAVEnv:
     def communication_graph(self):
         return communication.communication_graph(self)
 
-    def communication_components(self):
-        return communication.communication_components(self)
+    def communication_components(self, graph=None):
+        return communication.communication_components(self, graph=graph)
 
     def _direct_detected_targets(self, uav):
         return communication._direct_detected_targets(self, uav)
@@ -92,8 +92,8 @@ class CooperativeUAVEnv:
     def _direct_detected_threats(self, uav):
         return communication._direct_detected_threats(self, uav)
 
-    def shared_detection(self):
-        return communication.shared_detection(self)
+    def shared_detection(self, **kwargs):
+        return communication.shared_detection(self, **kwargs)
 
     def _bearing_error(self, uav, target):
         return combat._bearing_error(self, uav, target)
