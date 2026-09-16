@@ -208,7 +208,7 @@ class PIMAPPO:
             active=data["active"][:, env_idx, agent] > 0.5,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def _agent_chunk_boundaries(
         self,
         data: dict[str, torch.Tensor],
@@ -217,10 +217,9 @@ class PIMAPPO:
     ) -> dict[int, PIBeliefState]:
         """Reconstruct behaviour-policy recurrent states at TBPTT boundaries.
 
-        This runs exactly once per agent before any PPO step changes that actor.
-        Stored states are detached and reused by every PPO epoch, matching the
-        usual recurrent-PPO treatment of rollout RNN states while avoiding the
-        memory cost of storing every belief tensor in the rollout buffer.
+        ``no_grad`` is deliberate rather than ``inference_mode``: the detached
+        boundary tensors are later inputs to grad-enabled chunk replays, and
+        ordinary tensors avoid PyTorch's inference-tensor autograd restriction.
         """
         T, E = data["active"].shape[:2]
         state = self.actors[agent].initial_state(E, device=self.device)
@@ -288,7 +287,6 @@ class PIMAPPO:
         advantages: torch.Tensor,
         metrics: dict[str, list[float]],
     ) -> None:
-        """Legacy full-episode path retained for exact A/B comparison."""
         env_mb = min(self.config.sequence_env_minibatch_size, int(env_pool.numel()))
         for _ in range(self.config.ppo_epochs):
             order = env_pool[torch.randperm(env_pool.numel(), device=self.device)]
@@ -408,11 +406,6 @@ class PIMAPPO:
                         1.0 + self.config.clip_epsilon,
                     ) * adv
                     entropy = replay.entropy[mask]
-
-                    # Divide each chunk sum by the full minibatch count.  Backward
-                    # can therefore run immediately and release the chunk graph,
-                    # while accumulated gradients equal the mean full-trajectory
-                    # PPO objective under detached recurrent boundaries.
                     chunk_loss = (
                         -torch.min(surr1, surr2).sum()
                         - self.config.entropy_coef * entropy.sum()
@@ -432,8 +425,6 @@ class PIMAPPO:
                 )
                 self.actor_optimizers[agent].step()
 
-                # Critic remains feed-forward; keeping its old full-minibatch
-                # update preserves baseline MAPPO semantics and costs little VRAM.
                 critic_mask = full_mask
                 critic_states = data["states"][:, env_idx, agent][critic_mask]
                 target_returns = data["returns"][:, env_idx, agent][critic_mask]
