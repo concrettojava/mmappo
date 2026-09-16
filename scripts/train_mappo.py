@@ -15,10 +15,12 @@ those choices are explicit in ``MAPPOConfig`` and can be changed independently.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import random
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -35,6 +37,56 @@ def choose_device(name: str) -> str:
     if name != "auto":
         return name
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def progress_lines(
+    episode: int,
+    total: int,
+    mean_return: float,
+    avg100: float,
+    record: dict,
+    losses: dict,
+    run_start: float,
+    last_log_time: float,
+    last_log_episode: int,
+    start_episode: int,
+) -> tuple[str, str]:
+    now = time.perf_counter()
+    trained = episode - start_episode + 1
+    elapsed = max(now - run_start, 1e-9)
+    speed = trained / elapsed
+    sec_per_ep = elapsed / trained
+    window_eps = max(1, episode - last_log_episode)
+    window_time = now - last_log_time
+    remaining = max(0, total - episode)
+    eta_seconds = remaining / speed if speed > 0 else float("inf")
+    finish = datetime.now() + timedelta(seconds=eta_seconds if np.isfinite(eta_seconds) else 0)
+    percent = 100.0 * episode / total
+
+    line1 = (
+        f"[{episode:5d}/{total:<5d} {percent:6.2f}%]  "
+        f"return={mean_return:9.3f}  avg100={avg100:9.3f}  steps={record['steps']:3d}  "
+        f"completion={record['completion_ratio']:.3f}  survival={record['survival_ratio']:.3f}  "
+        f"actor={losses['actor_loss']:.4f}  critic={losses['critic_loss']:.4f}"
+    )
+    line2 = (
+        f"    speed={speed:.3f} ep/s ({sec_per_ep:.2f}s/ep)  |  "
+        f"last{window_eps}={format_duration(window_time)}  |  "
+        f"elapsed={format_duration(elapsed)}  |  ETA={format_duration(eta_seconds)}  |  "
+        f"finish≈{finish:%H:%M:%S}"
+    )
+    return line1, line2
 
 
 def main():
@@ -115,6 +167,10 @@ def main():
     print(f"device={device} obs_dim={vectorizer.observation_dim} state_dim={vectorizer.state_dim}")
 
     recent_returns = []
+    run_start = time.perf_counter()
+    last_log_time = run_start
+    last_log_episode = start_episode - 1
+
     for episode in range(start_episode, args.episodes + 1):
         obs, states = env.reset(seed=args.seed + episode - 1)
         buffer = RolloutBuffer(n_agents=n_agents)
@@ -167,12 +223,22 @@ def main():
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         if episode == start_episode or episode % args.log_every == 0:
-            print(
-                f"ep={episode:6d} return={mean_return:9.3f} "
-                f"avg100={np.mean(recent_returns):9.3f} steps={record['steps']:3d} "
-                f"completion={record['completion_ratio']:.3f} survival={record['survival_ratio']:.3f} "
-                f"actor={losses['actor_loss']:.4f} critic={losses['critic_loss']:.4f}"
+            line1, line2 = progress_lines(
+                episode,
+                args.episodes,
+                mean_return,
+                float(np.mean(recent_returns)),
+                record,
+                losses,
+                run_start,
+                last_log_time,
+                last_log_episode,
+                start_episode,
             )
+            print(line1)
+            print(line2)
+            last_log_time = time.perf_counter()
+            last_log_episode = episode
 
         if episode % args.save_every == 0 or episode == args.episodes:
             torch.save(
