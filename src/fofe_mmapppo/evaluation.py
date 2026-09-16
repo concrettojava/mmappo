@@ -18,11 +18,7 @@ def policy_actions_batch(
     active: np.ndarray,
     deterministic: bool = True,
 ) -> np.ndarray:
-    """Run actor-only batched inference.
-
-    This intentionally bypasses the critics. Under CTDE the critic is only
-    required during training; decentralized evaluation/execution uses actors.
-    """
+    """Run actor-only batched inference."""
     obs_vectors = np.asarray(obs_vectors, dtype=np.float32)
     active = np.asarray(active, dtype=np.float32)
     n_envs = obs_vectors.shape[0]
@@ -72,12 +68,9 @@ def evaluate_fixed_mappo(
     seed: int = 10000,
     deterministic: bool = True,
     batch_size: int | None = None,
+    scenario: str = "reference",
 ) -> Dict[str, Dict[str, float]]:
-    """Evaluate fixed-vector MAPPO with actor-only inference.
-
-    Environments are evaluated in batches solely for speed. Each episode uses
-    seed ``seed + episode_index`` and therefore remains independent.
-    """
+    """Evaluate fixed-vector MAPPO with actor-only inference."""
     if episodes <= 0:
         raise ValueError("episodes must be positive")
     if batch_size is None:
@@ -93,7 +86,10 @@ def evaluate_fixed_mappo(
 
     for start in range(0, episodes, batch_size):
         count = min(batch_size, episodes - start)
-        envs = [CooperativeUAVEnv(seed=seed + start + e) for e in range(count)]
+        envs = [
+            CooperativeUAVEnv(seed=seed + start + e, scenario=scenario)
+            for e in range(count)
+        ]
         obs = np.zeros((count, learner.n_agents, vectorizer.observation_dim), dtype=np.float32)
         state = np.zeros((count, learner.n_agents, vectorizer.state_dim), dtype=np.float32)
         active = np.zeros((count, learner.n_agents), dtype=np.float32)
