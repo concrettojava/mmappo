@@ -37,6 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from fofe_mmapppo.algorithms import PIParallelRolloutBuffer, PIMAPPO, PIMAPPOConfig
 from fofe_mmapppo.envs import CooperativeUAVEnv
+from fofe_mmapppo.gpu_monitor import GPUPhaseMonitor, GPUPhaseStats
 from fofe_mmapppo.models import EntityTensorizer, FixedVectorizer, PIActorConfig
 from fofe_mmapppo.terminal_status import FixedStatusHeader
 
@@ -150,6 +151,17 @@ def main() -> None:
         default=1,
         help="check unchanged-policy replay every N rollout batches; 0 disables",
     )
+    parser.add_argument(
+        "--gpu-monitor-interval",
+        type=float,
+        default=1.0,
+        help="nvidia-smi sampling interval in seconds (minimum 0.2)",
+    )
+    parser.add_argument(
+        "--disable-gpu-monitor",
+        action="store_true",
+        help="disable phased nvidia-smi/PyTorch CUDA telemetry",
+    )
     parser.add_argument("--log-every", type=int, default=4)
     parser.add_argument("--save-every", type=int, default=32)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs" / "pi_mappo_smoke")
@@ -166,6 +178,7 @@ def main() -> None:
         "belief-dim": args.belief_dim,
         "context-dim": args.context_dim,
         "relation-dim": args.relation_dim,
+        "gpu-monitor-interval": args.gpu_monitor_interval,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -251,6 +264,10 @@ def main() -> None:
         status = "restored" if restored_opt else "restarted (checkpoint has no optimizer state)"
         print(f"resume={args.resume} episode={start_episode} optimizer={status}")
 
+    gpu_monitor = GPUPhaseMonitor(device, interval_seconds=args.gpu_monitor_interval)
+    if args.disable_gpu_monitor:
+        gpu_monitor.enabled = False
+
     args.output.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output / "metrics.jsonl"
     writer = None
@@ -269,6 +286,10 @@ def main() -> None:
     print(
         "trainer=full-episode sequence replay; timestep shuffle=disabled; "
         "critic=baseline centralized MLP"
+    )
+    print(
+        f"gpu_monitor={'on' if gpu_monitor.enabled else 'off'} "
+        f"interval={gpu_monitor.interval_seconds:.1f}s backend=nvidia-smi+torch.cuda"
     )
     if writer is not None:
         print(f"tensorboard={args.output / 'tensorboard'}")
@@ -311,71 +332,79 @@ def main() -> None:
         buffer = PIParallelRolloutBuffer(n_envs=batch_envs, n_agents=8)
 
         collect_start = time.perf_counter()
-        while not bool(finished.all()):
-            structured = tensorizer.parallel(observations, finished=finished)
-            state_vectors = np.zeros((batch_envs, 8, fixed.state_dim), dtype=np.float32)
-            for e in range(batch_envs):
-                if not finished[e]:
-                    state_vectors[e] = fixed.batch_states(global_states[e])
+        with gpu_monitor.measure("collect") as collect_gpu:
+            while not bool(finished.all()):
+                structured = tensorizer.parallel(observations, finished=finished)
+                state_vectors = np.zeros((batch_envs, 8, fixed.state_dim), dtype=np.float32)
+                for e in range(batch_envs):
+                    if not finished[e]:
+                        state_vectors[e] = fixed.batch_states(global_states[e])
 
-            active = structured.active.astype(np.float32, copy=False)
-            actions, log_probs, values, beliefs = learner.act_batch(
-                structured.self_features,
-                structured.entity_features,
-                structured.evidence_mask,
-                structured.evidence_meta,
-                state_vectors,
-                active,
-                belief_states=beliefs,
-                deterministic=False,
-            )
-
-            reward_batch = np.zeros((batch_envs, 8), dtype=np.float32)
-            done_batch = np.ones((batch_envs, 8), dtype=np.float32)
-            next_observations = list(observations)
-            next_states = list(global_states)
-
-            for e, env in enumerate(envs):
-                if finished[e]:
-                    continue
-                next_obs, next_state, rewards, done, info = env.step(actions[e])
-                reward_batch[e] = np.fromiter(
-                    (rewards[i] for i in range(8)), dtype=np.float32, count=8
+                active = structured.active.astype(np.float32, copy=False)
+                actions, log_probs, values, beliefs = learner.act_batch(
+                    structured.self_features,
+                    structured.entity_features,
+                    structured.evidence_mask,
+                    structured.evidence_meta,
+                    state_vectors,
+                    active,
+                    belief_states=beliefs,
+                    deterministic=False,
                 )
-                done_batch[e] = np.asarray(
-                    [1.0 if done or next_obs[i] is None else 0.0 for i in range(8)],
-                    dtype=np.float32,
-                )
-                episode_returns[e] += reward_batch[e]
-                next_observations[e] = next_obs
-                next_states[e] = next_state
-                if done:
-                    finished[e] = True
-                    final_infos[e] = info
 
-            buffer.add(
-                structured.self_features,
-                structured.entity_features,
-                structured.evidence_mask,
-                structured.evidence_meta,
-                state_vectors,
-                actions,
-                log_probs,
-                reward_batch,
-                done_batch,
-                values,
-                active,
-            )
-            observations = next_observations
-            global_states = next_states
+                reward_batch = np.zeros((batch_envs, 8), dtype=np.float32)
+                done_batch = np.ones((batch_envs, 8), dtype=np.float32)
+                next_observations = list(observations)
+                next_states = list(global_states)
+
+                for e, env in enumerate(envs):
+                    if finished[e]:
+                        continue
+                    next_obs, next_state, rewards, done, info = env.step(actions[e])
+                    reward_batch[e] = np.fromiter(
+                        (rewards[i] for i in range(8)), dtype=np.float32, count=8
+                    )
+                    done_batch[e] = np.asarray(
+                        [1.0 if done or next_obs[i] is None else 0.0 for i in range(8)],
+                        dtype=np.float32,
+                    )
+                    episode_returns[e] += reward_batch[e]
+                    next_observations[e] = next_obs
+                    next_states[e] = next_state
+                    if done:
+                        finished[e] = True
+                        final_infos[e] = info
+
+                buffer.add(
+                    structured.self_features,
+                    structured.entity_features,
+                    structured.evidence_mask,
+                    structured.evidence_meta,
+                    state_vectors,
+                    actions,
+                    log_probs,
+                    reward_batch,
+                    done_batch,
+                    values,
+                    active,
+                )
+                observations = next_observations
+                global_states = next_states
 
         collect_seconds = time.perf_counter() - collect_start
+        collect_gpu_stats = collect_gpu.stats
         assert_finite_buffer(buffer)
         batch_index += 1
 
         replay_diag = None
+        replay_seconds = 0.0
+        replay_gpu_stats = GPUPhaseStats()
         if args.replay_check_every and batch_index % args.replay_check_every == 0:
-            replay_diag = learner.replay_diagnostics(buffer)
+            replay_start = time.perf_counter()
+            with gpu_monitor.measure("replay") as replay_gpu:
+                replay_diag = learner.replay_diagnostics(buffer)
+            replay_seconds = time.perf_counter() - replay_start
+            replay_gpu_stats = replay_gpu.stats
             if replay_diag["max_abs_ratio_error"] > 1e-4:
                 raise RuntimeError(
                     "unchanged-policy replay drifted before PPO update: "
@@ -383,13 +412,21 @@ def main() -> None:
                 )
 
         update_start = time.perf_counter()
-        losses = learner.update_parallel(buffer)
+        with gpu_monitor.measure("update") as update_gpu:
+            losses = learner.update_parallel(buffer)
         update_seconds = time.perf_counter() - update_start
+        update_gpu_stats = update_gpu.stats
         for key, value in losses.items():
             if not math.isfinite(value):
                 raise FloatingPointError(f"non-finite training metric {key}={value}")
 
         now = time.perf_counter()
+        phase_metrics = {
+            "replay_seconds": float(replay_seconds),
+            **collect_gpu_stats.as_dict("collect"),
+            **replay_gpu_stats.as_dict("replay"),
+            **update_gpu_stats.as_dict("update"),
+        }
         records = []
         for e, episode_id in enumerate(episode_ids.tolist()):
             info = final_infos[e]
@@ -411,6 +448,7 @@ def main() -> None:
                 "rollout_steps": int(len(buffer)),
                 "collect_seconds": float(collect_seconds),
                 "update_seconds": float(update_seconds),
+                **phase_metrics,
                 **losses,
             }
             if replay_diag is not None:
@@ -442,7 +480,28 @@ def main() -> None:
             writer.add_scalar("performance/episodes_per_second", speed, processed)
             writer.add_scalar("performance/seconds_per_episode", sec_per_ep, processed)
             writer.add_scalar("performance/collect_seconds", collect_seconds, processed)
+            writer.add_scalar("performance/replay_seconds", replay_seconds, processed)
             writer.add_scalar("performance/update_seconds", update_seconds, processed)
+            for phase, stats in (
+                ("collect", collect_gpu_stats),
+                ("replay", replay_gpu_stats),
+                ("update", update_gpu_stats),
+            ):
+                writer.add_scalar(f"gpu/{phase}_util_avg_pct", stats.util_avg_pct, processed)
+                writer.add_scalar(f"gpu/{phase}_util_max_pct", stats.util_max_pct, processed)
+                writer.add_scalar(f"gpu/{phase}_vram_peak_mib", stats.vram_peak_mib, processed)
+                writer.add_scalar(
+                    f"gpu/{phase}_torch_peak_allocated_mib",
+                    stats.torch_peak_allocated_mib,
+                    processed,
+                )
+                writer.add_scalar(
+                    f"gpu/{phase}_torch_peak_reserved_mib",
+                    stats.torch_peak_reserved_mib,
+                    processed,
+                )
+                writer.add_scalar(f"gpu/{phase}_power_avg_w", stats.power_avg_w, processed)
+                writer.add_scalar(f"gpu/{phase}_temp_max_c", stats.temp_max_c, processed)
             if replay_diag is not None:
                 writer.add_scalar(
                     "correctness/preupdate_max_ratio_error",
@@ -457,6 +516,15 @@ def main() -> None:
             replay_text = ""
             if replay_diag is not None:
                 replay_text = f" replay_err={replay_diag['max_abs_ratio_error']:.2e}"
+            gpu_text = ""
+            if gpu_monitor.enabled:
+                gpu_text = (
+                    f" gpu[c/r/u]={collect_gpu_stats.util_avg_pct:.0f}/"
+                    f"{replay_gpu_stats.util_avg_pct:.0f}/"
+                    f"{update_gpu_stats.util_avg_pct:.0f}%"
+                    f" vram_peak={max(collect_gpu_stats.vram_peak_mib, replay_gpu_stats.vram_peak_mib, update_gpu_stats.vram_peak_mib):.0f}MiB"
+                    f" torch_peak={max(collect_gpu_stats.torch_peak_allocated_mib, replay_gpu_stats.torch_peak_allocated_mib, update_gpu_stats.torch_peak_allocated_mib):.0f}MiB"
+                )
             header.log(
                 f"ep={processed:5d} return={last['mean_return']:9.3f} "
                 f"avg100={np.mean(recent_returns):9.3f} steps={last['steps']:3d} "
@@ -465,7 +533,8 @@ def main() -> None:
                 f"actor={losses['actor_loss']:.4f} critic={losses['critic_loss']:.4f} "
                 f"entropy={losses['entropy']:.4f} ratio={losses['ratio_mean']:.4f} "
                 f"clip={losses['clip_fraction']:.3f} collect={collect_seconds:.1f}s "
-                f"update={update_seconds:.1f}s{replay_text}"
+                f"replay={replay_seconds:.1f}s update={update_seconds:.1f}s"
+                f"{replay_text}{gpu_text}"
             )
             if writer is not None:
                 writer.add_scalar("task/batch_completion_ratio", batch_completion, processed)
