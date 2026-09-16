@@ -50,13 +50,7 @@ class RewardContext:
 
 
 def general_reward(a: float, b: float) -> float:
-    """Eq. (11).
-
-    The function is a bounded proximity/incompleteness penalty.  It is zero
-    when ``a >= b`` (or ``b <= 0``), approximately -1 at ``a == 0``, and is
-    clipped from below at -10 for negative ``a`` values such as boundary
-    violations.
-    """
+    """Eq. (11)."""
     a = float(a)
     b = float(b)
     if b <= 0.0 or a >= b:
@@ -99,9 +93,13 @@ def build_reward_context(env, previous_action_u: Mapping[int, float]) -> RewardC
         direct_targets[u.idx] = env._direct_detected_targets(u)
         direct_threats[u.idx] = env._direct_detected_threats(u)
 
-    # shared_detection also applies newly observed threat memory and uses the
-    # current communication topology.
-    shared = env.shared_detection()
+    # Reuse topology and direct detections.  Older code called shared_detection()
+    # without arguments, repeating all of the same geometry work a second time.
+    shared = env.shared_detection(
+        graph=graph,
+        direct_targets=direct_targets,
+        direct_threats=direct_threats,
+    )
     shared_targets = {uid: set(values[0]) for uid, values in shared.items()}
     shared_threats = {uid: set(values[1]) for uid, values in shared.items()}
 
@@ -129,7 +127,6 @@ def build_reward_context(env, previous_action_u: Mapping[int, float]) -> RewardC
 
 
 def mission_reward(env) -> float:
-    """Eq. (12), evaluated on the post-transition mission status."""
     alive_targets = sum(t.alive for t in env.targets)
     alive_uavs = sum(u.alive for u in env.uavs)
     return (
@@ -140,7 +137,6 @@ def mission_reward(env) -> float:
 
 
 def avoidance_reward(env, uav, ctx: RewardContext) -> float:
-    """R_i^Avoid in Eq. (13)."""
     value = 0.0
     for other in env.uavs:
         if other.idx == uav.idx or other.idx not in ctx.active_before:
@@ -152,7 +148,6 @@ def avoidance_reward(env, uav, ctx: RewardContext) -> float:
 
 
 def same_type_exclusion_reward(env, uav, radius_key: str, ctx: RewardContext) -> float:
-    """The isomorphic-exclusion term used by all three Eq. (14) rewards."""
     threshold = 0.8 * uav.p[radius_key]
     value = 0.0
     for other in env.uavs:
@@ -166,7 +161,6 @@ def same_type_exclusion_reward(env, uav, radius_key: str, ctx: RewardContext) ->
 
 
 def strike_reward(env, uav, ctx: RewardContext) -> float:
-    """R_i^Stk from Eq. (14)."""
     alive_targets = [t for t in env.targets if t.alive]
     nearest = _min_distance(env, uav, alive_targets)
     distance_term = -LAMBDA_DIST * nearest if nearest is not None else 0.0
@@ -176,23 +170,13 @@ def strike_reward(env, uav, ctx: RewardContext) -> float:
 
 
 def reconnaissance_reward(env, uav, ctx: RewardContext) -> float:
-    """R_i^Rec from Eq. (14).
-
-    Target IDs and threat IDs belong to different mathematical sets in the
-    paper.  Their integer IDs may overlap in code (e.g. target 0 and threat 0),
-    so effectiveness is computed by summing the two cardinalities rather than
-    taking a Python set union across namespaces.
-    """
     alive_targets = [t for t in env.targets if t.alive]
     unknown_threats = [env.threats[k] for k in sorted(ctx.undiscovered_threats)]
     nearest = _min_distance(env, uav, [*alive_targets, *unknown_threats])
     distance_term = -LAMBDA_DIST * nearest if nearest is not None else 0.0
 
     known_target_ids = set(ctx.direct_targets.get(uav.idx, set()))
-    known_threat_ids = (
-        set(ctx.direct_threats.get(uav.idx, set()))
-        | set(uav.threat_memory)
-    )
+    known_threat_ids = set(ctx.direct_threats.get(uav.idx, set())) | set(uav.threat_memory)
     known_count = len(known_target_ids) + len(known_threat_ids)
     denominator = len(alive_targets) + len(env.threats)
     effectiveness = general_reward(known_count, denominator)
@@ -201,7 +185,6 @@ def reconnaissance_reward(env, uav, ctx: RewardContext) -> float:
 
 
 def communication_reward(env, uav, ctx: RewardContext) -> float:
-    """R_i^Com from Eq. (14)."""
     others = [
         other for other in env.uavs
         if other.idx != uav.idx and other.idx in ctx.active_before
@@ -216,14 +199,12 @@ def communication_reward(env, uav, ctx: RewardContext) -> float:
 
 
 def action_reward(uav, previous_u: float) -> float:
-    """Eq. (15)."""
     current_u = float(uav.last_action_u)
     delta_u = current_u - float(previous_u)
     return -0.5 * abs(delta_u) - current_u * current_u
 
 
 def boundary_reward(env, uav) -> float:
-    """Eq. (16) for a [0, world_size] x [0, world_size] battlefield."""
     x_min = 0.0
     x_max = env.world_size
     y_min = 0.0
@@ -237,7 +218,6 @@ def boundary_reward(env, uav) -> float:
 
 
 def ability_reward(env, uav, ctx: RewardContext, newly_destroyed: Set[int]):
-    """Eq. (13)-(14), returning the total and diagnostic components."""
     r_avoid = avoidance_reward(env, uav, ctx)
     r_destroy = -50.0 if uav.idx in newly_destroyed else 0.0
     r_stk = strike_reward(env, uav, ctx)
@@ -262,13 +242,11 @@ def ability_reward(env, uav, ctx: RewardContext, newly_destroyed: Set[int]):
 
 
 def compute_rewards(env, ctx: RewardContext, newly_destroyed: Set[int]):
-    """Compute Eq. (17) for every agent plus a per-component breakdown."""
     r_mission = mission_reward(env)
     rewards: Dict[int, float] = {}
     breakdown: Dict[int, dict] = {}
 
     for uav in env.uavs:
-        # No repeated reward after an agent has already left the process.
         if uav.idx not in ctx.active_before:
             rewards[uav.idx] = 0.0
             breakdown[uav.idx] = {
