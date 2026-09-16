@@ -4,7 +4,7 @@ import numpy as np
 from typing import List
 from .entities import UAV, Target, Threat
 from .scenario import reset_scene
-from . import dynamics, communication, combat, observation
+from . import dynamics, communication, combat, observation, state
 
 class CooperativeUAVEnv:
     """
@@ -110,7 +110,7 @@ class CooperativeUAVEnv:
         return observation.get_observations(self)
 
     def get_global_state(self):
-        return observation.get_global_state(self)
+        return state.get_global_states(self)
 
     def step(self, action_indices):
         if len(action_indices) != len(self.uavs):
