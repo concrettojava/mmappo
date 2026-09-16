@@ -1,10 +1,9 @@
 """Regression checks for the frozen stage-1 physics and visualization baseline.
 
-The Dec-POMDP observation/state API intentionally changes in phase 2, so this
-regression no longer compares those public structures.  It compares the raw
-entity world state, termination/info values, preview trajectory and rendered
-figures instead.  Rule-level observation/state behavior is covered separately
-by ``tests/test_observation_state.py``.
+The Dec-POMDP observation/state API and reward API intentionally change in
+later phases.  This regression compares raw entity world state, termination,
+legacy info fields, preview trajectory and rendered figures so physics and
+visualization remain frozen.
 """
 from pathlib import Path
 import json
@@ -36,12 +35,15 @@ def plain(value):
 
 
 def legacy_world_state(env):
-    """Raw entity snapshot matching the frozen stage-1 get_global_state()."""
     return plain({
         "uavs": [vars(u).copy() for u in env.uavs],
         "targets": [vars(t).copy() for t in env.targets],
         "threats": [vars(th).copy() for th in env.threats],
     })
+
+
+def legacy_info(info):
+    return plain({k: v for k, v in info.items() if k != "reward_breakdown"})
 
 
 def check_rollout_against_saved(seed, random_actions, saved_records):
@@ -53,12 +55,13 @@ def check_rollout_against_saved(seed, random_actions, saved_records):
     for step in range(env.max_steps):
         actions = (action_rng.integers(0, 7, len(env.uavs))
                    if random_actions else np.full(len(env.uavs), 3))
-        _obs, _state, done, info = env.step(actions)
+        _obs, _state, rewards, done, info = env.step(actions)
+        assert set(rewards) == set(range(len(env.uavs)))
         expected = saved_records[step + 1]
         assert plain(actions) == expected["actions"]
         assert legacy_world_state(env) == expected["state"]
         assert bool(done) == expected["done"]
-        assert plain(info) == expected["info"]
+        assert legacy_info(info) == expected["info"]
         if done:
             break
 
