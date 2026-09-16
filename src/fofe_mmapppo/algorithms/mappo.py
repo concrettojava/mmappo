@@ -261,7 +261,7 @@ class MAPPO:
         }
         if include_optimizers:
             checkpoint["actor_optimizers"] = [opt.state_dict() for opt in self.actor_optimizers]
-            checkpoint["critic_optimizers"] = [opt.state_dict() for opt in self.critics]
+            checkpoint["critic_optimizers"] = [opt.state_dict() for opt in self.critic_optimizers]
         return checkpoint
 
     def load_checkpoint(self, checkpoint: dict, load_optimizers: bool = False):
