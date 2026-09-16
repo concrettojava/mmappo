@@ -7,6 +7,9 @@ dist/
 outputs/checks/
 outputs/paper_review/
 outputs/figures/
+outputs/mappo/
+*.pt
+*.pth
 *.log
 .env
 .env.*
