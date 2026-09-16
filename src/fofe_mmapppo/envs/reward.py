@@ -176,19 +176,26 @@ def strike_reward(env, uav, ctx: RewardContext) -> float:
 
 
 def reconnaissance_reward(env, uav, ctx: RewardContext) -> float:
-    """R_i^Rec from Eq. (14)."""
+    """R_i^Rec from Eq. (14).
+
+    Target IDs and threat IDs belong to different mathematical sets in the
+    paper.  Their integer IDs may overlap in code (e.g. target 0 and threat 0),
+    so effectiveness is computed by summing the two cardinalities rather than
+    taking a Python set union across namespaces.
+    """
     alive_targets = [t for t in env.targets if t.alive]
     unknown_threats = [env.threats[k] for k in sorted(ctx.undiscovered_threats)]
     nearest = _min_distance(env, uav, [*alive_targets, *unknown_threats])
     distance_term = -LAMBDA_DIST * nearest if nearest is not None else 0.0
 
-    known_by_self = (
-        set(ctx.direct_targets.get(uav.idx, set()))
-        | set(ctx.direct_threats.get(uav.idx, set()))
+    known_target_ids = set(ctx.direct_targets.get(uav.idx, set()))
+    known_threat_ids = (
+        set(ctx.direct_threats.get(uav.idx, set()))
         | set(uav.threat_memory)
     )
+    known_count = len(known_target_ids) + len(known_threat_ids)
     denominator = len(alive_targets) + len(env.threats)
-    effectiveness = general_reward(len(known_by_self), denominator)
+    effectiveness = general_reward(known_count, denominator)
     exclusion = same_type_exclusion_reward(env, uav, "recon_range", ctx)
     return distance_term + effectiveness + exclusion
 
