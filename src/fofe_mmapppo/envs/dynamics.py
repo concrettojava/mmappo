@@ -3,6 +3,7 @@ import math
 import numpy as np
 from .entities import ACTION_VALUES
 
+
 def _dist(a, b) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
 
@@ -35,12 +36,35 @@ def _update_uavs(env, action_indices):
         uav.x, uav.y = env._advance_xy(uav.x, uav.y, uav.yaw, uav.p["speed"])
 
 
+def _away_yaw(env, target, uav):
+    dx = target.x - uav.x
+    dy = target.y - uav.y
+    if env.paper_equation_yaw:
+        return math.atan2(dy, dx)
+    return math.atan2(dx, dy)
+
+
 def _update_targets(env):
     for t in env.targets:
         if not t.alive:
             continue
+
         alpha = float(env.rng.normal(0.0, env.target_turn_accel_std))
         t.omega += alpha * env.dt
+
+        if env.contested:
+            alive_uavs = [u for u in env.uavs if u.alive]
+            if alive_uavs:
+                nearest = min(alive_uavs, key=lambda u: (u.x - t.x) ** 2 + (u.y - t.y) ** 2)
+                d = math.hypot(nearest.x - t.x, nearest.y - t.y)
+                if d < env.evasive_trigger_range:
+                    desired = _away_yaw(env, t, nearest)
+                    error = env._wrap_angle(desired - t.yaw)
+                    max_turn = env.evasive_turn_rate * env.dt
+                    # Blend stochastic motion with a bounded reactive evasive turn.
+                    t.yaw = env._wrap_angle(t.yaw + float(np.clip(error, -max_turn, max_turn)))
+                    t.omega *= 0.65
+
         t.yaw = env._wrap_angle(t.yaw + t.omega * env.dt)
         nx, ny = env._advance_xy(t.x, t.y, t.yaw, env.target_speed)
 
