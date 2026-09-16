@@ -62,7 +62,7 @@ class MAPPO:
     @torch.no_grad()
     def act(self, obs_vectors: np.ndarray, state_vectors: np.ndarray,
             active: np.ndarray, deterministic: bool = False):
-        actions = np.full(self.n_agents, 3, dtype=np.int64)  # u=0 for inactive agents
+        actions = np.full(self.n_agents, 3, dtype=np.int64)
         log_probs = np.zeros(self.n_agents, dtype=np.float32)
         values = np.zeros(self.n_agents, dtype=np.float32)
 
@@ -148,15 +148,30 @@ class MAPPO:
             for key, values in metrics.items()
         }
 
-    def checkpoint(self):
-        return {
+    def checkpoint(self, include_optimizers: bool = False):
+        checkpoint = {
             "config": asdict(self.config),
             "n_agents": self.n_agents,
             "action_dim": self.action_dim,
             "actors": self.actors.state_dict(),
             "critics": self.critics.state_dict(),
         }
+        if include_optimizers:
+            checkpoint["actor_optimizers"] = [opt.state_dict() for opt in self.actor_optimizers]
+            checkpoint["critic_optimizers"] = [opt.state_dict() for opt in self.critic_optimizers]
+        return checkpoint
 
-    def load_checkpoint(self, checkpoint: dict):
+    def load_checkpoint(self, checkpoint: dict, load_optimizers: bool = False):
         self.actors.load_state_dict(checkpoint["actors"])
         self.critics.load_state_dict(checkpoint["critics"])
+
+        if load_optimizers:
+            actor_states = checkpoint.get("actor_optimizers")
+            critic_states = checkpoint.get("critic_optimizers")
+            if actor_states is not None and critic_states is not None:
+                for optimizer, state in zip(self.actor_optimizers, actor_states):
+                    optimizer.load_state_dict(state)
+                for optimizer, state in zip(self.critic_optimizers, critic_states):
+                    optimizer.load_state_dict(state)
+                return True
+        return False
