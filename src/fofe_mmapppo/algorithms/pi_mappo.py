@@ -6,14 +6,16 @@ parallel rollout batches are required to start at episode boundaries, so each
 replayed environment starts from a zero ``PIBeliefState``.  Environment
 minibatching is allowed; timestep shuffling is not.
 
-The implementation is intentionally conservative before performance work:
-full episode sequences are replayed for each selected environment minibatch.
-Truncated BPTT/chunk caching can be added only after this exact path has passed
-policy-ratio and episode-isolation tests.
+The implementation keeps the eager PIActor modules as the source of truth for
+parameters, optimizers and checkpoints.  On CUDA, an optional ``torch.compile``
+execution view is used for actor forward/replay calls only.  This preserves the
+same parameters and checkpoint format while allowing TorchInductor to fuse the
+many small kernels in PI-Net.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 from typing import Dict, Sequence
 
 import numpy as np
@@ -39,6 +41,11 @@ class PIMAPPOConfig:
     max_grad_norm: float = 0.5
     sequence_env_minibatch_size: int = 4
     fused_adam: bool = True
+    # Micro-benchmarking on the PIActor showed that the model is strongly
+    # launch-bound.  Compilation is therefore enabled by default on CUDA, but
+    # never on CPU.  Set PI_DISABLE_TORCH_COMPILE=1 for an eager A/B run.
+    compile_actors: bool = True
+    actor_compile_mode: str = "reduce-overhead"
 
 
 class PIMAPPO:
@@ -78,6 +85,36 @@ class PIMAPPO:
         self.critic_optimizers = [
             torch.optim.Adam(critic.parameters(), **adam_kwargs) for critic in self.critics
         ]
+
+        disable_compile = os.environ.get("PI_DISABLE_TORCH_COMPILE", "").strip().lower()
+        disable_compile = disable_compile in {"1", "true", "yes", "on"}
+        self.compiled_actors_enabled = bool(
+            self.config.compile_actors
+            and self.device.type == "cuda"
+            and not disable_compile
+            and hasattr(torch, "compile")
+        )
+        # Keep these wrappers outside a ModuleList.  The eager actors above remain
+        # the only registered modules, so state_dict/checkpoint keys stay stable
+        # and optimizers continue to own the original parameters.  OptimizedModule
+        # forwards to those same parameters, so gradients land on them normally.
+        if self.compiled_actors_enabled:
+            self._actor_executors = [
+                torch.compile(
+                    actor,
+                    mode=self.config.actor_compile_mode,
+                    fullgraph=False,
+                )
+                for actor in self.actors
+            ]
+        else:
+            self._actor_executors = list(self.actors)
+
+    @property
+    def actor_execution_backend(self) -> str:
+        if self.compiled_actors_enabled:
+            return f"torch.compile:{self.config.actor_compile_mode}"
+        return "eager"
 
     def initial_belief_states(self, n_envs: int) -> list[PIBeliefState]:
         return [
@@ -129,7 +166,7 @@ class PIMAPPO:
             em = torch.as_tensor(evidence_mask[:, i], device=self.device)
             meta = torch.as_tensor(evidence_meta[:, i], device=self.device)
             active_i = torch.as_tensor(active[:, i] > 0.5, device=self.device)
-            logits, candidate_state, _ = self.actors[i](
+            logits, candidate_state, _ = self._actor_executors[i](
                 sf, ef, em, meta, belief_states[i]
             )
             next_state = blend_belief_state(belief_states[i], candidate_state, active_i)
@@ -158,7 +195,7 @@ class PIMAPPO:
         env_idx: torch.Tensor,
     ):
         return unroll_pi_actor(
-            self.actors[agent],
+            self._actor_executors[agent],
             data["self_features"][:, env_idx, agent],
             data["entity_features"][:, env_idx, agent],
             data["evidence_mask"][:, env_idx, agent],
