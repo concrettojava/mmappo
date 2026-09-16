@@ -19,6 +19,7 @@ from matplotlib.animation import FuncAnimation
 from fofe_mmapppo.envs import CooperativeUAVEnv
 from fofe_mmapppo.evaluation import load_fixed_mappo_checkpoint, policy_actions_batch
 from fofe_mmapppo.visualization.renderer import SceneRenderer
+from fofe_mmapppo.visualization.contested_renderer import ContestedSceneRenderer
 
 
 class MAPPOEpisodeViewer:
@@ -29,15 +30,20 @@ class MAPPOEpisodeViewer:
         device: str,
         interval_ms: int,
         stochastic: bool,
+        scenario: str | None = None,
     ):
         self.seed = int(seed)
         self.device = device
         self.interval_ms = int(interval_ms)
         self.stochastic = bool(stochastic)
-        self.learner, self.vectorizer, _ = load_fixed_mappo_checkpoint(checkpoint, device)
-        self.env = CooperativeUAVEnv(seed=self.seed)
+        self.learner, self.vectorizer, checkpoint_data = load_fixed_mappo_checkpoint(
+            checkpoint, device
+        )
+        self.scenario = scenario or str(checkpoint_data.get("scenario", "reference"))
+        self.env = CooperativeUAVEnv(seed=self.seed, scenario=self.scenario)
         self.obs, _ = self.env.reset(seed=self.seed)
-        self.renderer = SceneRenderer(self.env)
+        renderer_cls = ContestedSceneRenderer if self.env.contested else SceneRenderer
+        self.renderer = renderer_cls(self.env)
         self.fig = self.renderer.fig
         self.paused = False
         self.done = False
@@ -116,8 +122,6 @@ class MAPPOEpisodeViewer:
         event_text = self._event_summary(info)
         if event_text:
             self.renderer.set_event_text(event_text)
-            # Keep rare combat events visible long enough to notice even with a
-            # fast animation interval.
             self.event_ttl = 12
         elif self.event_ttl > 0:
             self.event_ttl -= 1
@@ -130,6 +134,7 @@ class MAPPOEpisodeViewer:
             self.final_info = info
             print(
                 "episode finished: "
+                f"scenario={self.scenario} "
                 f"steps={info['step']} "
                 f"completion={info['completion_ratio']:.3f} "
                 f"survival={info['survival_ratio']:.3f} "
@@ -142,7 +147,8 @@ class MAPPOEpisodeViewer:
         self.renderer.draw()
         if self.done and self.final_info is not None:
             self.renderer.ax.set_title(
-                f"Episode finished | completion={self.final_info['completion_ratio']:.3f} "
+                f"Episode finished | scenario={self.scenario} "
+                f"completion={self.final_info['completion_ratio']:.3f} "
                 f"survival={self.final_info['survival_ratio']:.3f} "
                 f"steps={self.final_info['step']}",
                 fontsize=9,
@@ -161,6 +167,12 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--interval", type=int, default=80, help="milliseconds between frames")
     parser.add_argument(
+        "--scenario",
+        choices=("reference", "contested"),
+        default=None,
+        help="override checkpoint scenario; useful for probing a reference policy in contested conditions",
+    )
+    parser.add_argument(
         "--stochastic", action="store_true", help="sample policy actions instead of argmax"
     )
     args = parser.parse_args()
@@ -173,6 +185,7 @@ def main():
         device=args.device,
         interval_ms=args.interval,
         stochastic=args.stochastic,
+        scenario=args.scenario,
     )
     viewer.show()
 
