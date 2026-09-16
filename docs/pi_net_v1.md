@@ -37,15 +37,21 @@ The current V1 defaults are K=3 hypotheses and an 8-step future horizon.
 ## Forward computation
 
 1. Predict each persistent entity belief forward by one real environment step.
-2. If fresh evidence exists, perform evidence competition and gated correction.
+2. If evidence exists, first time-align stale position evidence to the current
+   step using only its age, recorded heading and known entity speed, then
+   perform evidence competition and gated correction.
 3. Roll every entity hypothesis H steps into the physical future.
 4. Analytically roll all seven UAV steering actions into H-step action
    primitives using known fixed-wing kinematics.
-5. For every action/entity/future step, predict future observation and
-   communication refresh probabilities from decentralized history/context.
-6. Propagate action-conditioned expected information age and uncertainty.
+5. For every action/entity/hypothesis/future step, predict future observation
+   and communication refresh probabilities.  The K futures remain separate
+   until after those probabilities are predicted; the model does not first
+   average multiple possible target positions into a fictitious mean target.
+6. Aggregate hypothesis-conditioned refresh probabilities with mode weights,
+   then propagate action-conditioned expected information age and uncertainty.
 7. Build a physical-information interaction lattice with shape
-   `[B, 7, 14, K, H, relation_dim]`.
+   `[B, 7, 14, K, H, relation_dim]`.  Each lattice cell receives its own
+   hypothesis-conditioned refresh signal.
 8. Read out task value and information value for each action, then combine them
    through a learned cognitive-demand gate.
 
@@ -62,13 +68,20 @@ The actor input deliberately excludes:
 Those variables may later be used only as training labels for auxiliary
 prediction losses.
 
-## Important training constraint
+## Stateful PPO constraint
 
 PI-Net is stateful.  It must **not** be connected to the existing shuffled
 feed-forward PPO minibatch update as if it were an MLP.  Doing so would break
-temporal semantics.  The next engineering stage will add a recurrent/sequence
-PPO path (or explicitly stored belief-state inputs) and validate policy-ratio
-consistency before long training runs.
+temporal semantics.
+
+`unroll_pi_actor` provides the first sequence-safe replay primitive.  For an
+unchanged policy, replaying the same observation sequence from the same initial
+belief must reproduce the rollout logits and log-probabilities, so the initial
+PPO importance ratio is one.  Inactive synchronized-rollout padding is frozen,
+and an explicit reset mask clears belief at episode boundaries.
+
+The next engineering stage will build the recurrent PPO buffer/update path on
+this sequence primitive rather than flattening time.
 
 ## Validation gates before trainer integration
 
@@ -80,8 +93,19 @@ consistency before long training runs.
 - finite logits and probabilities
 - age growth when evidence is missing
 - age reset when evidence reappears
+- stale-evidence dead reckoning before physical correction
+- hypothesis-conditioned information-future aggregation
 - fixed-wing action primitive geometry
 - differentiability/backpropagation
 - selective recurrent-state reset at episode boundaries
 
-Only after these tests pass should the model be connected to rollout/training.
+`tests/test_pi_sequence.py` checks:
+
+- rollout/replay logits and log-probability equality for an unchanged policy
+- initial PPO importance ratio equal to one
+- inactive padding does not advance belief state
+- episode reset does not leak previous-episode memory
+- gradients propagate through the sequence replay path
+
+Only after these gates pass should the model be connected to recurrent PPO
+training and then to longer experiments.
