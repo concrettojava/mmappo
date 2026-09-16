@@ -19,6 +19,7 @@ the single-environment reference trainer.
 from __future__ import annotations
 
 import argparse
+import atexit
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
@@ -31,6 +32,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np
 import torch
+from torch.utils.tensorboard import SummaryWriter
 
 from fofe_mmapppo.algorithms import MAPPO, MAPPOConfig, ParallelRolloutBuffer
 from fofe_mmapppo.envs import CooperativeUAVEnv
@@ -99,6 +101,8 @@ def main():
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs" / "mappo_parallel")
+    parser.add_argument("--no-tensorboard", action="store_true",
+                        help="disable TensorBoard scalar logging")
     args = parser.parse_args()
 
     if args.episodes <= 0 or args.num_envs <= 0 or args.minibatch_size <= 0:
@@ -145,10 +149,17 @@ def main():
 
     args.output.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output / "metrics.jsonl"
+    writer = None
+    if not args.no_tensorboard:
+        writer = SummaryWriter(log_dir=str(args.output / "tensorboard"))
+        atexit.register(writer.close)
+
     print(
         f"device={device} num_envs={args.num_envs} minibatch={cfg.minibatch_size} "
         f"obs_dim={vectorizer.observation_dim} state_dim={vectorizer.state_dim}"
     )
+    if writer is not None:
+        print(f"tensorboard={args.output / 'tensorboard'}")
 
     recent_returns = []
     processed = start_episode
@@ -221,7 +232,8 @@ def main():
             recent_returns.append(mean_return)
             if len(recent_returns) > 100:
                 recent_returns.pop(0)
-            records.append({
+            avg100 = float(np.mean(recent_returns))
+            record = {
                 "episode": int(episode_id),
                 "mean_return": mean_return,
                 "steps": int(info["step"]),
@@ -229,17 +241,33 @@ def main():
                 "survival_ratio": float(info["survival_ratio"]),
                 "num_envs": int(batch_envs),
                 **losses,
-            })
+            }
+            records.append(record)
+            if writer is not None:
+                writer.add_scalar("train/mean_return", mean_return, episode_id)
+                writer.add_scalar("train/avg100_return", avg100, episode_id)
+                writer.add_scalar("task/completion_ratio", record["completion_ratio"], episode_id)
+                writer.add_scalar("task/survival_ratio", record["survival_ratio"], episode_id)
+                writer.add_scalar("task/episode_steps", record["steps"], episode_id)
+
         with metrics_path.open("a", encoding="utf-8") as f:
             f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
 
         processed += batch_envs
 
+        elapsed = max(now - run_start, 1e-9)
+        trained = processed - start_episode
+        speed = trained / elapsed
+        sec_per_ep = elapsed / max(trained, 1)
+
+        if writer is not None:
+            writer.add_scalar("loss/actor", losses["actor_loss"], processed)
+            writer.add_scalar("loss/critic", losses["critic_loss"], processed)
+            writer.add_scalar("performance/episodes_per_second", speed, processed)
+            writer.add_scalar("performance/seconds_per_episode", sec_per_ep, processed)
+            writer.add_scalar("performance/active_num_envs", batch_envs, processed)
+
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
-            elapsed = max(now - run_start, 1e-9)
-            trained = processed - start_episode
-            speed = trained / elapsed
-            sec_per_ep = elapsed / max(trained, 1)
             window_eps = max(1, processed - last_log_episode)
             window_time = now - last_log_time
             remaining = max(0, args.episodes - processed)
@@ -264,6 +292,10 @@ def main():
                 f"elapsed={format_duration(elapsed)}  |  ETA={format_duration(eta_seconds)}  |  "
                 f"finish≈{finish:%H:%M:%S}"
             )
+            if writer is not None:
+                writer.add_scalar("task/batch_completion_ratio", batch_completion, processed)
+                writer.add_scalar("task/batch_survival_ratio", batch_survival, processed)
+                writer.flush()
             last_log_time = time.perf_counter()
             last_log_episode = processed
 
@@ -272,6 +304,10 @@ def main():
                 args.output / f"checkpoint_{processed:06d}.pt",
                 learner, vectorizer, processed, args.num_envs,
             )
+
+    if writer is not None:
+        writer.flush()
+        writer.close()
 
 
 if __name__ == "__main__":
