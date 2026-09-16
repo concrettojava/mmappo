@@ -18,10 +18,13 @@ def main():
     parser.add_argument("--seed", type=int, default=10000)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--scenario", choices=("reference", "contested"), default=None,
+                        help="override checkpoint scenario (normally unnecessary)")
     parser.add_argument("--stochastic", action="store_true", help="sample actions instead of argmax")
     args = parser.parse_args()
 
-    learner, vectorizer, _ = load_fixed_mappo_checkpoint(args.checkpoint, args.device)
+    learner, vectorizer, checkpoint = load_fixed_mappo_checkpoint(args.checkpoint, args.device)
+    scenario = args.scenario or str(checkpoint.get("scenario", "reference"))
     stats = evaluate_fixed_mappo(
         learner,
         vectorizer,
@@ -29,8 +32,10 @@ def main():
         seed=args.seed,
         deterministic=not args.stochastic,
         batch_size=args.batch_size,
+        scenario=scenario,
     )
 
+    print(f"scenario: {scenario}")
     print(f"episodes: {args.episodes}")
     for name, values in stats.items():
         print(f"{name}: {values['mean']:.4f} ± {values['std']:.4f}")
