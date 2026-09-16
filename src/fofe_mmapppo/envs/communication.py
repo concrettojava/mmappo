@@ -1,22 +1,33 @@
 """Communication subgroups, local detection and shared knowledge."""
+from __future__ import annotations
+
 from typing import Dict, Set
+
 from .entities import UAV
 
+
 def communication_graph(env) -> Dict[int, Set[int]]:
+    """Build the direct communication graph.
+
+    The scenario is tiny (at most 8 UAVs), so plain Python loops are faster here
+    than allocating NumPy matrices every environment step.  We still keep the
+    reuse hooks in ``shared_detection`` so geometry is not recomputed twice.
+    """
     alive = [u for u in env.uavs if u.alive]
     graph = {u.idx: set() for u in alive}
     for i, a in enumerate(alive):
-        for b in alive[i+1:]:
-            # Paper Eq.(1): direct communication if distance is within
-            # max(comm_range_i, comm_range_j).
-            if env._dist(a, b) < max(a.p["comm_range"], b.p["comm_range"]):
+        for b in alive[i + 1:]:
+            dx = a.x - b.x
+            dy = a.y - b.y
+            limit = max(a.p["comm_range"], b.p["comm_range"])
+            if dx * dx + dy * dy < limit * limit:
                 graph[a.idx].add(b.idx)
                 graph[b.idx].add(a.idx)
     return graph
 
 
-def communication_components(env) -> Dict[int, Set[int]]:
-    graph = env.communication_graph()
+def communication_components(env, graph=None) -> Dict[int, Set[int]]:
+    graph = env.communication_graph() if graph is None else graph
     comps = {}
     visited = set()
     for node in graph:
@@ -37,26 +48,54 @@ def communication_components(env) -> Dict[int, Set[int]]:
 
 
 def _direct_detected_targets(env, uav: UAV) -> Set[int]:
-    return {t.idx for t in env.targets
-            if t.alive and env._dist(uav, t) < uav.p["recon_range"]}
+    limit2 = float(uav.p["recon_range"]) ** 2
+    ux, uy = uav.x, uav.y
+    return {
+        t.idx
+        for t in env.targets
+        if t.alive and (ux - t.x) ** 2 + (uy - t.y) ** 2 < limit2
+    }
 
 
 def _direct_detected_threats(env, uav: UAV) -> Set[int]:
-    found = {th.idx for th in env.threats
-             if env._dist(uav, th) < uav.p["recon_range"]}
+    limit2 = float(uav.p["recon_range"]) ** 2
+    ux, uy = uav.x, uav.y
+    found = {
+        th.idx
+        for th in env.threats
+        if (ux - th.x) ** 2 + (uy - th.y) ** 2 < limit2
+    }
     uav.threat_memory |= found
     return found
 
 
-def shared_detection(env):
-    comps = env.communication_components()
-    direct_targets = {}
-    direct_threats = {}
-    for u in env.uavs:
-        if u.alive:
-            direct_targets[u.idx] = env._direct_detected_targets(u)
-            direct_threats[u.idx] = env._direct_detected_threats(u)
+def shared_detection(
+    env,
+    *,
+    graph=None,
+    direct_targets=None,
+    direct_threats=None,
+):
+    """Return component-shared detections.
 
+    Callers that already computed communication/detection data may pass it in;
+    this avoids repeating the same geometry work during reward construction.
+    """
+    graph = env.communication_graph() if graph is None else graph
+    comps = communication_components(env, graph=graph)
+
+    if direct_targets is None or direct_threats is None:
+        direct_targets = {} if direct_targets is None else direct_targets
+        direct_threats = {} if direct_threats is None else direct_threats
+        for u in env.uavs:
+            if not u.alive:
+                continue
+            if u.idx not in direct_targets:
+                direct_targets[u.idx] = env._direct_detected_targets(u)
+            if u.idx not in direct_threats:
+                direct_threats[u.idx] = env._direct_detected_threats(u)
+
+    uav_by_id = {u.idx: u for u in env.uavs}
     result = {}
     for u in env.uavs:
         if not u.alive:
@@ -64,8 +103,7 @@ def shared_detection(env):
         comp = comps.get(u.idx, {u.idx})
         visible_targets = set().union(*(direct_targets.get(v, set()) for v in comp))
         visible_threats = set().union(*(
-            (direct_threats.get(v, set()) |
-             next(x for x in env.uavs if x.idx == v).threat_memory)
+            (direct_threats.get(v, set()) | uav_by_id[v].threat_memory)
             for v in comp
         ))
         result[u.idx] = (visible_targets, visible_threats)

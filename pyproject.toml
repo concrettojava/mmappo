@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["numpy", "matplotlib"]
 
 [project.optional-dependencies]
-rl = ["torch>=2.2"]
+rl = ["torch>=2.2", "tensorboard>=2.16"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

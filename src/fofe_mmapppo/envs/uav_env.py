@@ -7,32 +7,8 @@ from .scenario import reset_scene
 from . import dynamics, communication, combat, observation, state, reward
 
 class CooperativeUAVEnv:
-    """
-    Scene-level reproduction of Wang et al., FOFE-MMAPPO paper.
+    """Scene-level reproduction of Wang et al., FOFE-MMAPPO paper."""
 
-    Scope:
-      - 4 km x 4 km battlefield
-      - 8 heterogeneous RSUAVs
-      - 4 moving targets
-      - 3 fixed threat areas
-      - communication topology + multi-hop subgroups
-      - local detection + observation sharing
-      - automatic strike
-      - collision destruction
-      - probabilistic threat destruction
-      - paper reward Eqs. (11)-(17)
-      - 1 s step, 200-step episode
-
-    This file intentionally does NOT implement MAPPO/FOFE/Mamba yet.
-
-    Coordinate convention:
-      The paper's Table 2 says yaw=0 means Heading North, but Eq.(5) writes
-      xdot=v*cos(yaw), ydot=v*sin(yaw), which would mean yaw=0 points East.
-      To match Fig.7 / "enter from the south", this reproduction uses:
-          xdot = v*sin(yaw), ydot = v*cos(yaw)
-      so yaw=0 points North.
-      Set paper_equation_yaw=True to instead follow Eq.(5) literally.
-    """
     def __init__(
         self,
         seed: int = 0,
@@ -58,13 +34,32 @@ class CooperativeUAVEnv:
         self.targets: List[Target] = []
         self.threats: List[Threat] = []
         self.step_count = 0
+        self._geometry_cache = None
 
     def reset(self, seed: int | None = None):
+        self._geometry_cache = None
         reset_scene(self, seed)
         return self.get_observations(), self.get_global_state()
 
-    @staticmethod
-    def _dist(a, b):
+    def reset_vectors(self, vectorizer, seed: int | None = None):
+        """Reset and return fixed vectors without structured observation/state objects."""
+        self._geometry_cache = None
+        reset_scene(self, seed)
+        return vectorizer.encode_env(self)
+
+    def _dist(self, a, b):
+        cache = self._geometry_cache
+        if cache is not None:
+            if isinstance(a, UAV) and isinstance(b, UAV):
+                return float(cache["uav_uav"][a.idx, b.idx])
+            if isinstance(a, UAV) and isinstance(b, Target):
+                return float(cache["uav_target"][a.idx, b.idx])
+            if isinstance(a, Target) and isinstance(b, UAV):
+                return float(cache["uav_target"][b.idx, a.idx])
+            if isinstance(a, UAV) and isinstance(b, Threat):
+                return float(cache["uav_threat"][a.idx, b.idx])
+            if isinstance(a, Threat) and isinstance(b, UAV):
+                return float(cache["uav_threat"][b.idx, a.idx])
         return dynamics._dist(a, b)
 
     @staticmethod
@@ -83,8 +78,8 @@ class CooperativeUAVEnv:
     def communication_graph(self):
         return communication.communication_graph(self)
 
-    def communication_components(self):
-        return communication.communication_components(self)
+    def communication_components(self, graph=None):
+        return communication.communication_components(self, graph=graph)
 
     def _direct_detected_targets(self, uav):
         return communication._direct_detected_targets(self, uav)
@@ -92,8 +87,8 @@ class CooperativeUAVEnv:
     def _direct_detected_threats(self, uav):
         return communication._direct_detected_threats(self, uav)
 
-    def shared_detection(self):
-        return communication.shared_detection(self)
+    def shared_detection(self, **kwargs):
+        return communication.shared_detection(self, **kwargs)
 
     def _bearing_error(self, uav, target):
         return combat._bearing_error(self, uav, target)
@@ -113,23 +108,19 @@ class CooperativeUAVEnv:
     def get_global_state(self):
         return state.get_global_states(self)
 
-    def step(self, action_indices):
-        """Advance one second and return observation, state, reward, done, info.
-
-        Reward shaping needs the post-maneuver geometry before automatic combat
-        effects.  A reward context is therefore captured after UAV/target motion
-        and detection, then strike/collision/threat damage is resolved, and the
-        final Eq. (17) reward is evaluated with post-transition mission status.
-        """
+    def prepare_step(self, action_indices):
+        """Apply movement only, returning context needed to finish the step."""
         if len(action_indices) != len(self.uavs):
             raise ValueError(f"Expected {len(self.uavs)} actions, got {len(action_indices)}")
-
         previous_action_u = {u.idx: float(u.last_action_u) for u in self.uavs}
-
+        self._geometry_cache = None
         self.step_count += 1
         self._update_uavs(action_indices)
         self._update_targets()
+        return previous_action_u
 
+    def _resolve_step(self, previous_action_u):
+        """Resolve detection/combat/reward and return rewards, done and info."""
         reward_ctx = reward.build_reward_context(self, previous_action_u)
         shared = {
             uid: (
@@ -144,25 +135,43 @@ class CooperativeUAVEnv:
         threat_dead = self._apply_threat_damage()
         newly_destroyed = set(collision_dead) | set(threat_dead)
 
-        rewards, reward_breakdown = reward.compute_rewards(
-            self, reward_ctx, newly_destroyed
-        )
-
+        rewards, reward_breakdown = reward.compute_rewards(self, reward_ctx, newly_destroyed)
         done = (
             self.step_count >= self.max_steps
             or all(not t.alive for t in self.targets)
             or all(not u.alive for u in self.uavs)
         )
 
+        alive_uavs = sum(u.alive for u in self.uavs)
+        alive_targets = sum(t.alive for t in self.targets)
         info = {
             "step": self.step_count,
             "strikes": strikes,
             "collision_dead": sorted(collision_dead),
             "threat_dead": sorted(threat_dead),
-            "alive_uavs": sum(u.alive for u in self.uavs),
-            "alive_targets": sum(t.alive for t in self.targets),
-            "completion_ratio": 1.0 - sum(t.alive for t in self.targets) / len(self.targets),
-            "survival_ratio": sum(u.alive for u in self.uavs) / len(self.uavs),
+            "alive_uavs": alive_uavs,
+            "alive_targets": alive_targets,
+            "completion_ratio": 1.0 - alive_targets / len(self.targets),
+            "survival_ratio": alive_uavs / len(self.uavs),
             "reward_breakdown": reward_breakdown,
         }
+        return rewards, done, info
+
+    def finish_step(self, previous_action_u):
+        """Reference path: resolve step then materialize structured outputs."""
+        rewards, done, info = self._resolve_step(previous_action_u)
         return self.get_observations(), self.get_global_state(), rewards, done, info
+
+    def finish_step_vectors(self, previous_action_u, vectorizer):
+        """Training path: resolve step then directly emit fixed arrays."""
+        rewards, done, info = self._resolve_step(previous_action_u)
+        obs_vec, state_vec, active = vectorizer.encode_env(self)
+        return obs_vec, state_vec, active, rewards, done, info
+
+    def step(self, action_indices):
+        previous_action_u = self.prepare_step(action_indices)
+        return self.finish_step(previous_action_u)
+
+    def step_vectors(self, action_indices, vectorizer):
+        previous_action_u = self.prepare_step(action_indices)
+        return self.finish_step_vectors(previous_action_u, vectorizer)
