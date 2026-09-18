@@ -48,13 +48,14 @@ def _time_iters(fn, iters, device):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Benchmark sequential vs vmap execution of independent PI actors.")
+    p = argparse.ArgumentParser(description="Benchmark sequential vs vmapped execution of independent PI actors.")
     p.add_argument("--device", default="cuda")
     p.add_argument("--agents", type=int, default=8)
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--iters", type=int, default=20)
     p.add_argument("--backward", action="store_true")
+    p.add_argument("--compile-sequential", action="store_true")
     p.add_argument("--compile-vmap", action="store_true")
     args = p.parse_args()
 
@@ -63,8 +64,9 @@ def main():
     cfg = PIActorConfig()
     actors = [PIActor(cfg).to(device) for _ in range(args.agents)]
 
-    # Keep all actors independent, but stack their parameters/buffers along a new
-    # leading actor dimension for functional vmap execution.
+    # Keep the exact independent-actor semantics. stack_module_state creates an
+    # actor dimension over otherwise independent parameters; vmap only changes
+    # execution layout, not parameter sharing.
     params, buffers = stack_module_state(actors)
     base = copy.deepcopy(actors[0]).to("meta")
 
@@ -74,7 +76,7 @@ def main():
     em = torch.ones(A, B, E, device=device)
     meta = torch.zeros(A, B, E, 4, device=device)
 
-    # Make inputs semantically benign enough to avoid invalid scale explosions.
+    # Semantically benign values avoid meaningless invalid-scale behavior.
     sf[..., 2:5] = 0.0
     sf[..., 2] = 1.0
     sf[..., 6:8] = torch.rand(A, B, 2, device=device)
@@ -88,12 +90,19 @@ def main():
     states = [actor.initial_state(B, device=device) for actor in actors]
     stacked_state = _stack_states(states)
 
+    executors = actors
+    if args.compile_sequential:
+        executors = [
+            torch.compile(actor, mode="default", fullgraph=False)
+            for actor in actors
+        ]
+
     def sequential_forward():
         logits = []
         next_states = []
-        for i, actor in enumerate(actors):
+        for i, executor in enumerate(executors):
             state_i = _state_from_tensors(tuple(v[i] for v in stacked_state))
-            out, ns, _ = actor(sf[i], ef[i], em[i], meta[i], state_i)
+            out, ns, _ = executor(sf[i], ef[i], em[i], meta[i], state_i)
             logits.append(out)
             next_states.append(ns)
         return torch.stack(logits, 0), _stack_states(next_states)
@@ -138,22 +147,33 @@ def main():
     seq_step = make_step(sequential_forward, seq_params)
     vmap_step = make_step(vmap_forward, stacked_params)
 
-    # Numerical equivalence before timing.
+    # Check execution equivalence before performance timing.
     with torch.no_grad():
         seq_logits, seq_state = sequential_forward()
         vm_logits, vm_state = vmap_forward()
     max_logits = float((seq_logits - vm_logits).abs().max().cpu())
     max_state = max(float((a - b).abs().max().cpu()) for a, b in zip(seq_state, vm_state))
 
+    # Warmups absorb torch.compile and CUDA cold start. Timings below are steady-state.
     for _ in range(args.warmup):
         seq_step()
     for _ in range(args.warmup):
         vmap_step()
 
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     seq_s, seq_loss = _time_iters(seq_step, args.iters, device)
-    vmap_s, vmap_loss = _time_iters(vmap_step, args.iters, device)
+    seq_peak = torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else 0.0
 
-    print(f"device={device} agents={A} batch={B} backward={args.backward} compile_vmap={args.compile_vmap}")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    vmap_s, vmap_loss = _time_iters(vmap_step, args.iters, device)
+    vmap_peak = torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else 0.0
+
+    print(
+        f"device={device} agents={A} batch={B} backward={args.backward} "
+        f"compile_sequential={args.compile_sequential} compile_vmap={args.compile_vmap}"
+    )
     print(f"max_logits_abs_diff={max_logits:.6e}")
     print(f"max_state_abs_diff={max_state:.6e}")
     print(f"sequential={seq_s * 1000.0:.3f} ms/iter")
@@ -162,8 +182,9 @@ def main():
     print(f"seq_loss={float(seq_loss.detach().cpu()):.8f}")
     print(f"vmap_loss={float(vmap_loss.detach().cpu()):.8f}")
     if device.type == "cuda":
-        print(f"cuda_peak_allocated={torch.cuda.max_memory_allocated(device) / 2**20:.1f} MiB")
-        print(f"cuda_peak_reserved={torch.cuda.max_memory_reserved(device) / 2**20:.1f} MiB")
+        print(f"seq_peak_allocated={seq_peak:.1f} MiB")
+        print(f"vmap_peak_allocated={vmap_peak:.1f} MiB")
+        print(f"cuda_reserved={torch.cuda.max_memory_reserved(device) / 2**20:.1f} MiB")
 
 
 if __name__ == "__main__":
