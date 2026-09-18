@@ -51,6 +51,7 @@ class PIMAPPOConfig:
     actor_compile_mode: str = "default"
     batch_actor_updates: bool = False
     actor_batch_size: int = 8
+    actor_saved_steps: int = 0
 
 
 class PIMAPPO:
@@ -116,13 +117,16 @@ class PIMAPPO:
         self._batched_groups = []
         if self.config.actor_batch_size <= 0:
             raise ValueError("actor_batch_size must be positive")
+        if self.config.actor_saved_steps < 0:
+            raise ValueError("actor_saved_steps must be non-negative")
         if self.config.batch_actor_updates:
             from .pi_batched import BatchedPIActors
             for start in range(0, self.n_agents, self.config.actor_batch_size):
                 end = min(self.n_agents, start + self.config.actor_batch_size)
                 backend = BatchedPIActors(
                     self.actors[start:end], self.compiled_actors_enabled,
-                    self.config.actor_compile_mode)
+                    self.config.actor_compile_mode,
+                    saved_steps=self.config.actor_saved_steps)
                 self._batched_groups.append((start, end, backend))
 
     @property

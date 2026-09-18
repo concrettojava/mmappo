@@ -18,9 +18,12 @@ def stack_beliefs(states):
 
 
 class BatchedPIActors:
-    def __init__(self, actors, compile_enabled=False, compile_mode="default", activation_checkpoint=True):
+    def __init__(self, actors, compile_enabled=False, compile_mode="default", activation_checkpoint=True, saved_steps=0):
         self.actors = actors
         self.activation_checkpoint = activation_checkpoint
+        if saved_steps < 0:
+            raise ValueError("saved_steps must be non-negative")
+        self.saved_steps = int(saved_steps)
         base = copy.deepcopy(actors[0]).to("meta")
 
         def one(params, buffers, sf, ef, em, meta, active, state):
@@ -49,12 +52,15 @@ class BatchedPIActors:
         logits = []
         for t in range(active.shape[0]):
             args = (*weights, *(x[t] for x in inputs), active[t], state)
-            if self.activation_checkpoint and torch.is_grad_enabled():
+            recompute = self.activation_checkpoint and t < active.shape[0] - self.saved_steps
+            if recompute and torch.is_grad_enabled():
                 # Recompute step activations on backward, preserving the full
                 # recurrent gradient horizon without storing expanded vmap weights.
                 row, state = checkpoint(self.step, *args, use_reentrant=False,
                                         preserve_rng_state=False)
             else:
+                # Retain the final K steps when memory permits. Backward frees
+                # these graphs first; the recurrent gradient span is unchanged.
                 row, state = self.step(*args)
             logits.append(torch.where(active[t, ..., None], row, torch.zeros_like(row)))
         return torch.stack(logits), state

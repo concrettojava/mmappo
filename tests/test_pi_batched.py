@@ -101,6 +101,14 @@ class BatchedPIUpdateTests(unittest.TestCase):
         self.fixture.learner.config.actor_batch_size = 1
         self.compare_update(2, uneven=True, tail=True)
 
+    def test_partially_saved_activations_match_serial(self):
+        self.fixture.learner.config.actor_saved_steps = 1
+        self.compare_update(2)
+
+    def test_fully_saved_activations_match_serial(self):
+        self.fixture.learner.config.actor_saved_steps = 4
+        self.compare_update(2, uneven=True, tail=True)
+
     def test_float32_updated_policy_matches(self):
         f = self.fixture
         buffer = f._build_rollout()

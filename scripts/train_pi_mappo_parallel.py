@@ -131,17 +131,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sequence-preserving parallel PI-MAPPO trainer")
     parser.add_argument("--actor-batch-size", type=int, default=8,
                         help="number of independent actors per update group")
+    parser.add_argument("--actor-saved-steps", type=int, default=0,
+                        help="retain this many final steps per TBPTT chunk to reduce recomputation")
     parser.add_argument("--batch-actor-updates", action=argparse.BooleanOptionalAction, default=None,
                         help="batch independent actor updates (default: enabled on CUDA)")
     parser.add_argument("--episodes", type=int, default=64, help="final global episode number")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--cuda-memory-fraction", type=float, default=None,
+                        help="optional PyTorch allocation ceiling as a fraction of GPU memory")
     parser.add_argument("--scenario", choices=("reference", "contested"), default="contested")
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--ppo-epochs", type=int, default=1)
-    parser.add_argument("--sequence-env-minibatch-size", type=int, default=4)
+    parser.add_argument(
+        "--sequence-env-minibatch-size",
+        type=int,
+        default=8,
+        help="environment sequences per PPO minibatch; 8 is the throughput default",
+    )
     parser.add_argument("--learning-rate", type=float, default=4e-5)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--critic-hidden-dim", type=int, default=256)
@@ -170,7 +179,11 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=32)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs" / "pi_mappo_smoke")
     parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument("--phase-progress", action="store_true",
+                        help="print collection/update phase starts, including cold compilation")
     args = parser.parse_args()
+    if args.cuda_memory_fraction is not None and not 0 < args.cuda_memory_fraction <= 1:
+        parser.error("cuda-memory-fraction must be in (0, 1]")
 
     positive = {
         "episodes": args.episodes,
@@ -198,6 +211,8 @@ def main() -> None:
     torch.set_float32_matmul_precision("high")
 
     device = choose_device(args.device)
+    if args.cuda_memory_fraction is not None and torch.device(device).type == "cuda":
+        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device)
     probe = CooperativeUAVEnv(
         seed=args.seed,
         scenario=args.scenario,
@@ -258,6 +273,7 @@ def main() -> None:
     cfg.batch_actor_updates = (torch.device(device).type == "cuda" if args.batch_actor_updates is None
                                else args.batch_actor_updates)
     cfg.actor_batch_size = args.actor_batch_size
+    cfg.actor_saved_steps = args.actor_saved_steps
 
     print(f"actor_update={'batched' if cfg.batch_actor_updates else 'sequential'} actor_batch_size={cfg.actor_batch_size}")
     learner = PIMAPPO(
@@ -340,6 +356,8 @@ def main() -> None:
         beliefs = learner.initial_belief_states(batch_envs)
         buffer = PIParallelRolloutBuffer(n_envs=batch_envs, n_agents=8)
 
+        if args.phase_progress:
+            print(f"phase=collect environments={batch_envs}", flush=True)
         collect_start = time.perf_counter()
         with gpu_monitor.measure("collect") as collect_gpu:
             while not bool(finished.all()):
@@ -420,6 +438,9 @@ def main() -> None:
                     f"{replay_diag}"
                 )
 
+        if args.phase_progress:
+            print(f"phase=update environments={batch_envs} steps={len(buffer)} "
+                  f"collect_seconds={collect_seconds:.2f}", flush=True)
         update_start = time.perf_counter()
         with gpu_monitor.measure("update") as update_gpu:
             losses = learner.update_parallel(buffer)
