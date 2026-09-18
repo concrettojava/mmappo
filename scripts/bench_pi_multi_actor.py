@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import argparse
 import copy
+from pathlib import Path
+import sys
 import time
+
+# This benchmark is often launched with the reference worktree's virtualenv.
+# Put this worktree's src/ first so imports resolve to the PI branch rather than
+# an editable install from /home/fofe_mmapppo_scene_stage1.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_ROOT))
 
 import torch
 from torch.func import functional_call, stack_module_state, vmap
