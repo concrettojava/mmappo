@@ -129,6 +129,10 @@ def save_checkpoint(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sequence-preserving parallel PI-MAPPO trainer")
+    parser.add_argument("--actor-batch-size", type=int, default=8,
+                        help="number of independent actors per update group")
+    parser.add_argument("--batch-actor-updates", action=argparse.BooleanOptionalAction, default=None,
+                        help="batch independent actor updates (default: enabled on CUDA)")
     parser.add_argument("--episodes", type=int, default=64, help="final global episode number")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--seed", type=int, default=7)
@@ -251,6 +255,11 @@ def main() -> None:
             max_age=float(args.max_steps),
         )
 
+    cfg.batch_actor_updates = (torch.device(device).type == "cuda" if args.batch_actor_updates is None
+                               else args.batch_actor_updates)
+    cfg.actor_batch_size = args.actor_batch_size
+
+    print(f"actor_update={'batched' if cfg.batch_actor_updates else 'sequential'} actor_batch_size={cfg.actor_batch_size}")
     learner = PIMAPPO(
         fixed.state_dim,
         n_agents=8,

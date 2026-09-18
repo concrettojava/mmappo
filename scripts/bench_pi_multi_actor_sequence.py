@@ -14,6 +14,7 @@ from torch.func import functional_call, stack_module_state, vmap
 
 from fofe_mmapppo.models import PIActor, PIActorConfig, PIBeliefState
 from fofe_mmapppo.algorithms.pi_sequence import blend_belief_state
+from fofe_mmapppo.algorithms.pi_batched import BatchedPIActors
 
 
 STATE_FIELDS = (
@@ -63,7 +64,12 @@ def main():
     p.add_argument("--iters", type=int, default=5)
     p.add_argument("--compile-sequential", action="store_true")
     p.add_argument("--compile-vmap", action="store_true")
+    p.add_argument("--activation-checkpoint", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--vmap-compile-scope", choices=("step", "sequence"), default="step")
     args = p.parse_args()
+    if args.vmap_compile_scope == "sequence" and args.activation_checkpoint:
+        p.error("whole-sequence compilation requires --no-activation-checkpoint")
+    print(f"Preparing sequence benchmark; vmap_compile_scope={args.vmap_compile_scope}", flush=True)
 
     torch.manual_seed(17)
     device = torch.device(args.device)
@@ -131,8 +137,15 @@ def main():
         return out[0], out[1:]
 
     vmap_forward = vmap_forward_raw
-    if args.compile_vmap:
+    if args.vmap_compile_scope == "step":
+        backend = BatchedPIActors(actors, args.compile_vmap, activation_checkpoint=args.activation_checkpoint)
+        def vmap_forward():
+            return backend.unroll((params, buffers),
+                                  (sf, ef, em, meta), active, stacked_init)
+    elif args.compile_vmap:
         vmap_forward = torch.compile(vmap_forward_raw, mode="default", fullgraph=False)
+
+    print("Checking forward outputs (first call may compile)...", flush=True)
 
     with torch.no_grad():
         seq_logits, seq_state = sequential_forward()
@@ -146,10 +159,19 @@ def main():
     def seq_step():
         for p in seq_params:
             p.grad = None
-        logits, state = sequential_forward()
-        loss = logits.square().mean() + 1e-4 * state[0].square().mean()
-        loss.backward()
-        return loss
+        # Match trainer memory lifetime: backward one actor before the next.
+        total_loss = torch.zeros((), device=device)
+        for i, executor in enumerate(executors):
+            state = make_state(tuple(v[i] for v in stacked_init))
+            rows = []
+            for t in range(T):
+                logits, cand, _ = executor(sf[t, i], ef[t, i], em[t, i], meta[t, i], state)
+                state = blend_belief_state(state, cand, active[t, i])
+                rows.append(logits)
+            loss = (torch.stack(rows).square().mean() + 1e-4 * state.latent.square().mean()) / A
+            loss.backward()
+            total_loss += loss.detach()
+        return total_loss
 
     def vm_step():
         for p in vm_params:
@@ -159,16 +181,23 @@ def main():
         loss.backward()
         return loss
 
+    print("Warming sequential forward/backward...", flush=True)
     for _ in range(args.warmup):
         seq_step()
+    print("Warming batched forward/backward...", flush=True)
     for _ in range(args.warmup):
         vm_step()
 
+    print("Timing steady-state runs...", flush=True)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     seq_s, seq_loss = timed(seq_step, args.iters, device)
     seq_peak = torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else 0.0
 
+    sequential_gradients = {
+        name: torch.stack([dict(a.named_parameters())[name].grad for a in actors]).detach().clone()
+        for name in params
+    }
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     vm_s, vm_loss = timed(vm_step, args.iters, device)
@@ -176,13 +205,20 @@ def main():
 
     print(
         f"device={device} agents={A} batch={B} steps={T} "
-        f"compile_sequential={args.compile_sequential} compile_vmap={args.compile_vmap}"
+        f"compile_sequential={args.compile_sequential} compile_vmap={args.compile_vmap} "
+        f"activation_checkpoint={args.activation_checkpoint}"
     )
     print(f"max_logits_abs_diff={max_logits:.6e}")
     print(f"max_state_abs_diff={max_state:.6e}")
     print(f"sequential={seq_s:.4f} s/iter")
     print(f"vmap={vm_s:.4f} s/iter")
     print(f"speedup={seq_s / vm_s:.3f}x")
+    max_gradient = max(float((params[k].grad - sequential_gradients[k]).abs().max().cpu())
+                       for k in params)
+    grad_delta = sum((params[k].grad - sequential_gradients[k]).double().square().sum() for k in params)
+    grad_norm = sum(g.double().square().sum() for g in sequential_gradients.values())
+    print(f"max_gradient_abs_diff={max_gradient:.6e}")
+    print(f"gradient_relative_l2={float((grad_delta / grad_norm.clamp_min(1e-30)).sqrt().cpu()):.6e}")
     print(f"seq_loss={float(seq_loss.detach().cpu()):.8f}")
     print(f"vmap_loss={float(vm_loss.detach().cpu()):.8f}")
     if device.type == "cuda":

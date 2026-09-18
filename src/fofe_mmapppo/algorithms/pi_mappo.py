@@ -9,7 +9,9 @@ still carries information across the complete episode while gradients are
 bounded to a configurable temporal window.
 
 The eager PIActor modules remain the source of truth for parameters, optimizers
-and checkpoints.  On CUDA, optional ``torch.compile`` execution views point to
+and checkpoints. Batched updates stack their parameters differentiably and
+checkpoint per-step activations without shortening the recurrent gradient span.
+On CUDA, optional ``torch.compile`` execution views point to
 the same parameters and are used only for forward/replay execution.
 """
 from __future__ import annotations
@@ -47,6 +49,8 @@ class PIMAPPOConfig:
     fused_adam: bool = True
     compile_actors: bool = True
     actor_compile_mode: str = "default"
+    batch_actor_updates: bool = False
+    actor_batch_size: int = 8
 
 
 class PIMAPPO:
@@ -108,6 +112,18 @@ class PIMAPPO:
             ]
         else:
             self._actor_executors = list(self.actors)
+
+        self._batched_groups = []
+        if self.config.actor_batch_size <= 0:
+            raise ValueError("actor_batch_size must be positive")
+        if self.config.batch_actor_updates:
+            from .pi_batched import BatchedPIActors
+            for start in range(0, self.n_agents, self.config.actor_batch_size):
+                end = min(self.n_agents, start + self.config.actor_batch_size)
+                backend = BatchedPIActors(
+                    self.actors[start:end], self.compiled_actors_enabled,
+                    self.config.actor_compile_mode)
+                self._batched_groups.append((start, end, backend))
 
     @property
     def actor_execution_backend(self) -> str:
@@ -473,7 +489,12 @@ class PIMAPPO:
         chunk_length = min(int(self.config.tbptt_chunk_length), T)
         use_chunked = chunk_length < T
 
-        for agent in range(self.n_agents):
+        if self._batched_groups:
+            from .pi_batched import update_batched
+            for start, end, backend in self._batched_groups:
+                update_batched(self, data, metrics, chunk_length, backend, start, end)
+
+        for agent in range(self.n_agents) if not self._batched_groups else ():
             active_all = data["active"][:, :, agent] > 0.5
             env_pool = torch.nonzero(active_all.any(dim=0), as_tuple=False).squeeze(-1)
             if env_pool.numel() == 0:
