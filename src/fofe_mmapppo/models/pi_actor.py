@@ -51,6 +51,7 @@ class PIActorConfig:
     belief_dim: int = 64
     context_dim: int = 32
     relation_dim: int = 64
+    reactive_dim: int = 256
     world_size: float = 4000.0
     max_age: float = 200.0
     action_decay: float = 0.70
@@ -154,6 +155,27 @@ class PIActor(nn.Module):
             nn.Tanh(),
             _linear(D, len(self.ACTION_VALUES), gain=0.01),
         )
+
+        # Capacity-first V2: current decentralized evidence has a direct route
+        # to action logits. PI reasoning is a residual augmentation instead of
+        # the only entity-to-action path.
+        reactive_in = SELF_DIM + c.n_entities * (ENTITY_DIM + 1 + EVIDENCE_META_DIM)
+        self.current_evidence_head = nn.Sequential(
+            _linear(reactive_in, c.reactive_dim, gain=math.sqrt(2.0)),
+            nn.SiLU(),
+            _linear(c.reactive_dim, len(self.ACTION_VALUES), gain=0.01),
+        )
+        # Unknown targets have no invented position; their absence is encoded
+        # explicitly so a search policy can learn before first discovery.
+        self.search_head = nn.Sequential(
+            _linear(SELF_DIM + 8, D, gain=math.sqrt(2.0)),
+            nn.SiLU(),
+            _linear(D, len(self.ACTION_VALUES), gain=0.01),
+        )
+        # Start the difficult counterfactual PI path as a small learnable
+        # residual while basic reactive control is being acquired.
+        self._pi_residual_logit = nn.Parameter(torch.tensor(-2.1972246))
+        self._search_residual_logit = nn.Parameter(torch.tensor(-0.8472979))
 
         self._dispersion_gain = nn.Parameter(torch.tensor(-2.0))
         self._age_gain = nn.Parameter(torch.tensor(-3.0))
@@ -410,6 +432,79 @@ class PIActor(nn.Module):
             yaw_seq.append(yaw[..., None])
         return torch.stack(pos_seq, dim=2), torch.stack(yaw_seq, dim=2)
 
+    def _discovery_stats(
+        self,
+        evidence_mask: torch.Tensor,
+        state: PIBeliefState,
+    ) -> torch.Tensor:
+        """Observable/belief summary for search and first-discovery behaviour.
+
+        Feature order:
+        teammate_visible, target_visible, threat_visible,
+        overall_visible, overall_known, target_known,
+        unknown_target, mean_known_target_age.
+        """
+        c = self.config
+        t0 = c.n_teammates
+        t1 = t0 + c.n_targets
+        h0 = t1
+        h1 = h0 + c.n_threats
+        known = state.known.squeeze(-1)
+
+        teammate_visible = evidence_mask[:, :t0].mean(dim=1, keepdim=True)
+        target_visible = evidence_mask[:, t0:t1].mean(dim=1, keepdim=True)
+        threat_visible = evidence_mask[:, h0:h1].mean(dim=1, keepdim=True)
+        overall_visible = evidence_mask.mean(dim=1, keepdim=True)
+        overall_known = known.mean(dim=1, keepdim=True)
+        target_known_vec = known[:, t0:t1]
+        target_known = target_known_vec.mean(dim=1, keepdim=True)
+        unknown_target = 1.0 - target_known
+        target_age = (state.age[:, t0:t1, 0] / c.max_age).clamp(0.0, 1.0)
+        mean_target_age = (target_age * target_known_vec).sum(
+            dim=1, keepdim=True
+        ) / target_known_vec.sum(dim=1, keepdim=True).clamp_min(1.0)
+        return torch.cat(
+            [
+                teammate_visible,
+                target_visible,
+                threat_visible,
+                overall_visible,
+                overall_known,
+                target_known,
+                unknown_target,
+                mean_target_age,
+            ],
+            dim=-1,
+        )
+
+    def _reactive_logits(
+        self,
+        self_features: torch.Tensor,
+        entity_features: torch.Tensor,
+        evidence_mask: torch.Tensor,
+        evidence_meta: torch.Tensor,
+        state: PIBeliefState,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Direct local-evidence controller plus explicit discovery controller."""
+        mask = evidence_mask[..., None]
+        masked_entities = entity_features * mask
+        masked_meta = evidence_meta * mask
+        reactive_input = torch.cat(
+            [
+                self_features,
+                masked_entities.reshape(self_features.shape[0], -1),
+                evidence_mask,
+                masked_meta.reshape(self_features.shape[0], -1),
+            ],
+            dim=-1,
+        )
+        reactive = self.self_action_head(self_features) + self.current_evidence_head(
+            reactive_input
+        )
+        discovery = self._discovery_stats(evidence_mask, state)
+        search = self.search_head(torch.cat([self_features, discovery], dim=-1))
+        return reactive, search, discovery
+
     def _base_dispersion(
         self, future_pos: torch.Tensor, mode_probs: torch.Tensor
     ) -> torch.Tensor:
@@ -597,7 +692,21 @@ class PIActor(nn.Module):
         )
         cognitive_gate = torch.sigmoid(self.cognitive_gate(gate_input))
 
-        logits = self.self_action_head(self_features) + task_value + cognitive_gate * info_value
+        reactive_logits, search_logits, discovery_stats = self._reactive_logits(
+            self_features,
+            entity_features,
+            evidence_mask,
+            evidence_meta,
+            next_state,
+        )
+        pi_residual = task_value + cognitive_gate * info_value
+        pi_residual_scale = torch.sigmoid(self._pi_residual_logit)
+        search_residual_scale = torch.sigmoid(self._search_residual_logit)
+        logits = (
+            reactive_logits
+            + search_residual_scale * search_logits
+            + pi_residual_scale * pi_residual
+        )
         aux = {
             **info,
             "future_position": future_pos,
@@ -609,6 +718,12 @@ class PIActor(nn.Module):
             "task_value": task_value,
             "info_value": info_value,
             "cognitive_gate": cognitive_gate,
+            "reactive_logits": reactive_logits,
+            "search_logits": search_logits,
+            "discovery_stats": discovery_stats,
+            "pi_residual": pi_residual,
+            "pi_residual_scale": pi_residual_scale,
+            "search_residual_scale": search_residual_scale,
         }
         return logits, next_state, aux
 
