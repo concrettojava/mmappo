@@ -133,6 +133,50 @@ class PIActorTests(unittest.TestCase):
         sums = aux["mode_probs"].sum(dim=-1)
         self.assertTrue(torch.allclose(sums, torch.ones_like(sums), atol=1e-6))
         self.assertTrue(((aux["q_refresh"] >= 0.0) & (aux["q_refresh"] <= 1.0)).all())
+        self.assertEqual(tuple(aux["reactive_logits"].shape), (self.B, 7))
+        self.assertEqual(tuple(aux["search_logits"].shape), (self.B, 7))
+        self.assertEqual(tuple(aux["discovery_stats"].shape), (self.B, 8))
+        self.assertGreater(float(aux["pi_residual_scale"]), 0.0)
+        self.assertLess(float(aux["pi_residual_scale"]), 0.2)
+
+    def test_unknown_targets_are_explicit_in_discovery_state(self):
+        empty_entities = torch.zeros_like(self.entities)
+        empty_mask = torch.zeros_like(self.mask)
+        _, _, aux_empty = self.actor(
+            self.self_features, empty_entities, empty_mask, self.meta
+        )
+        self.assertTrue(
+            torch.allclose(aux_empty["discovery_stats"][:, 6], torch.ones(self.B))
+        )
+
+        _, _, aux_seen = self.actor(
+            self.self_features, self.entities, self.mask, self.meta
+        )
+        self.assertTrue(
+            torch.allclose(
+                aux_seen["discovery_stats"][:, 6],
+                torch.full((self.B,), 0.75),
+                atol=1e-6,
+            )
+        )
+
+    def test_current_evidence_has_direct_action_path(self):
+        _, _, aux_a = self.actor(
+            self.self_features, self.entities, self.mask, self.meta
+        )
+        moved = self.entities.clone()
+        moved[:, self.target_slot, 9] = 0.90
+        moved[:, self.target_slot, 10] = 0.15
+        _, _, aux_b = self.actor(
+            self.self_features, moved, self.mask, self.meta
+        )
+        self.assertFalse(
+            torch.allclose(
+                aux_a["reactive_logits"],
+                aux_b["reactive_logits"],
+                atol=1e-10,
+            )
+        )
 
     def test_information_refresh_is_aggregated_after_hypothesis_prediction(self):
         _, _, aux = self.actor(
