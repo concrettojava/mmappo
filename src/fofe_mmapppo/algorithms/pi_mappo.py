@@ -552,11 +552,27 @@ class PIMAPPO:
         }
         result["tbptt_chunk_length"] = float(chunk_length)
         result["tbptt_chunks"] = float((T + chunk_length - 1) // chunk_length)
+        result["pi_residual_scale"] = float(
+            np.mean(
+                [
+                    torch.tanh(actor._pi_residual_gate).detach().cpu().item()
+                    for actor in self.actors
+                ]
+            )
+        )
+        result["search_residual_scale"] = float(
+            np.mean(
+                [
+                    torch.sigmoid(actor._search_residual_logit).detach().cpu().item()
+                    for actor in self.actors
+                ]
+            )
+        )
         return result
 
     def checkpoint(self, include_optimizers: bool = False) -> dict:
         checkpoint = {
-            "algorithm": "pi_mappo_v2_capacity_first",
+            "algorithm": "pi_mappo_v2_1_capacity_first",
             "config": asdict(self.config),
             "actor_config": asdict(self.actor_config),
             "n_agents": self.n_agents,
