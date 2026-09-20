@@ -1,0 +1,274 @@
+{
+  "protocol": {
+    "scenario": "contested",
+    "episodes": 128,
+    "seed_start": 50000,
+    "seed_end": 50127,
+    "deterministic": true,
+    "batch_size": 32,
+    "device": "cuda",
+    "return_comparison_note": "Compare mean_agent_return only within the same reward_profile. Task metrics are the primary cross-profile comparison."
+  },
+  "checkpoints": [
+    {
+      "label": "pi_mappo_ep000512_checkpoint_000512",
+      "checkpoint": "outputs/pi_v2_gate_A_e1_lr8e5/checkpoint_000512.pt",
+      "algorithm": "pi_mappo",
+      "checkpoint_episode": 512,
+      "reward_profile": "paper",
+      "max_steps": 200,
+      "compile_actors": false,
+      "scenario": "contested",
+      "seed_start": 50000,
+      "seed_end": 50127,
+      "deterministic": true,
+      "summary": {
+        "episodes": 128,
+        "completion_ratio": {
+          "n": 128,
+          "mean": 0.15625,
+          "std": 0.19515618744994995,
+          "ci95": 0.03380908456641128
+        },
+        "full_success_rate": {
+          "n": 128,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "survival_ratio": {
+          "n": 128,
+          "mean": 0.87890625,
+          "std": 0.12591219891629843,
+          "ci95": 0.021813175573516898
+        },
+        "steps": {
+          "n": 128,
+          "mean": 200.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "success_completion_steps": {
+          "n": 0,
+          "mean": null,
+          "std": null,
+          "ci95": null
+        },
+        "targets_destroyed": {
+          "n": 128,
+          "mean": 0.625,
+          "std": 0.7806247497997998,
+          "ci95": 0.13523633826564513
+        },
+        "mean_agent_return": {
+          "n": 128,
+          "mean": -1584.8188228607178,
+          "std": 237.07914514751238,
+          "ci95": 41.07186644687036
+        },
+        "targets_destroyed_distribution": {
+          "0": 68,
+          "1": 44,
+          "2": 12,
+          "3": 4,
+          "4": 0
+        }
+      }
+    },
+    {
+      "label": "pi_mappo_ep000512_checkpoint_000512",
+      "checkpoint": "outputs/pi_v2_gate_B_e1_lr15e5/checkpoint_000512.pt",
+      "algorithm": "pi_mappo",
+      "checkpoint_episode": 512,
+      "reward_profile": "paper",
+      "max_steps": 200,
+      "compile_actors": false,
+      "scenario": "contested",
+      "seed_start": 50000,
+      "seed_end": 50127,
+      "deterministic": true,
+      "summary": {
+        "episodes": 128,
+        "completion_ratio": {
+          "n": 128,
+          "mean": 0.177734375,
+          "std": 0.19553698037291917,
+          "ci95": 0.033875053574635834
+        },
+        "full_success_rate": {
+          "n": 128,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "survival_ratio": {
+          "n": 128,
+          "mean": 0.8974609375,
+          "std": 0.1163339684878028,
+          "ci95": 0.020153831810016534
+        },
+        "steps": {
+          "n": 128,
+          "mean": 200.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "success_completion_steps": {
+          "n": 0,
+          "mean": null,
+          "std": null,
+          "ci95": null
+        },
+        "targets_destroyed": {
+          "n": 128,
+          "mean": 0.7109375,
+          "std": 0.7821479214916767,
+          "ci95": 0.13550021429854334
+        },
+        "mean_agent_return": {
+          "n": 128,
+          "mean": -1504.9809818267822,
+          "std": 212.67199607894483,
+          "ci95": 36.843543595995676
+        },
+        "targets_destroyed_distribution": {
+          "0": 60,
+          "1": 48,
+          "2": 17,
+          "3": 3,
+          "4": 0
+        }
+      }
+    },
+    {
+      "label": "pi_mappo_ep000512_checkpoint_000512",
+      "checkpoint": "outputs/pi_v2_gate_C_e2_lr12e5/checkpoint_000512.pt",
+      "algorithm": "pi_mappo",
+      "checkpoint_episode": 512,
+      "reward_profile": "paper",
+      "max_steps": 200,
+      "compile_actors": false,
+      "scenario": "contested",
+      "seed_start": 50000,
+      "seed_end": 50127,
+      "deterministic": true,
+      "summary": {
+        "episodes": 128,
+        "completion_ratio": {
+          "n": 128,
+          "mean": 0.10546875,
+          "std": 0.14186734216667873,
+          "ci95": 0.024577263120367832
+        },
+        "full_success_rate": {
+          "n": 128,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "survival_ratio": {
+          "n": 128,
+          "mean": 0.8916015625,
+          "std": 0.13107418819149175,
+          "ci95": 0.022707444590637747
+        },
+        "steps": {
+          "n": 128,
+          "mean": 200.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "success_completion_steps": {
+          "n": 0,
+          "mean": null,
+          "std": null,
+          "ci95": null
+        },
+        "targets_destroyed": {
+          "n": 128,
+          "mean": 0.421875,
+          "std": 0.5674693686667149,
+          "ci95": 0.09830905248147133
+        },
+        "mean_agent_return": {
+          "n": 128,
+          "mean": -1374.4102392196655,
+          "std": 161.59560564160805,
+          "ci95": 27.995010396986398
+        },
+        "targets_destroyed_distribution": {
+          "0": 79,
+          "1": 44,
+          "2": 5,
+          "3": 0,
+          "4": 0
+        }
+      }
+    },
+    {
+      "label": "pi_mappo_ep000512_checkpoint_000512",
+      "checkpoint": "outputs/pi_v2_gate_D_e4_lr8e5/checkpoint_000512.pt",
+      "algorithm": "pi_mappo",
+      "checkpoint_episode": 512,
+      "reward_profile": "paper",
+      "max_steps": 200,
+      "compile_actors": false,
+      "scenario": "contested",
+      "seed_start": 50000,
+      "seed_end": 50127,
+      "deterministic": true,
+      "summary": {
+        "episodes": 128,
+        "completion_ratio": {
+          "n": 128,
+          "mean": 0.1875,
+          "std": 0.19764235376052372,
+          "ci95": 0.03423979090546553
+        },
+        "full_success_rate": {
+          "n": 128,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "survival_ratio": {
+          "n": 128,
+          "mean": 0.896484375,
+          "std": 0.1094970022688264,
+          "ci95": 0.01896938784185205
+        },
+        "steps": {
+          "n": 128,
+          "mean": 200.0,
+          "std": 0.0,
+          "ci95": 0.0
+        },
+        "success_completion_steps": {
+          "n": 0,
+          "mean": null,
+          "std": null,
+          "ci95": null
+        },
+        "targets_destroyed": {
+          "n": 128,
+          "mean": 0.75,
+          "std": 0.7905694150420949,
+          "ci95": 0.1369591636218621
+        },
+        "mean_agent_return": {
+          "n": 128,
+          "mean": -1022.2921986579895,
+          "std": 108.51005273373121,
+          "ci95": 18.798407558158146
+        },
+        "targets_destroyed_distribution": {
+          "0": 57,
+          "1": 49,
+          "2": 19,
+          "3": 3,
+          "4": 0
+        }
+      }
+    }
+  ]
+}

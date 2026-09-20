@@ -16,3 +16,7 @@ outputs/mappo/
 !.env.example
 *.pem
 *.key
+
+# Training runtime artifacts
+outputs/**/tensorboard/
+events.out.tfevents.*
