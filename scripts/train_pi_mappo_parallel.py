@@ -428,6 +428,7 @@ def main() -> None:
         f"actor_lr={cfg.actor_learning_rate or cfg.learning_rate:g} "
         f"critic_lr={cfg.critic_learning_rate or cfg.learning_rate:g} "
         f"entropy={cfg.entropy_coef:g} "
+        f"actor_backend={learner.actor_execution_backend} "
         f"actor_params/agent={actor_params:,} critic_params/agent={critic_params:,}"
     )
     print(
@@ -657,7 +658,10 @@ def main() -> None:
                 f"batch_c={batch_completion:.3f} batch_s={batch_survival:.3f} "
                 f"actor={losses['actor_loss']:.4f} critic={losses['critic_loss']:.4f} "
                 f"entropy={losses['entropy']:.4f} ratio={losses['ratio_mean']:.4f} "
-                f"clip={losses['clip_fraction']:.3f} collect={collect_seconds:.1f}s "
+                f"clip={losses['clip_fraction']:.3f} "
+                f"pi_scale={losses.get('pi_residual_scale', 0.0):+.4f} "
+                f"search_scale={losses.get('search_residual_scale', 0.0):.4f} "
+                f"collect={collect_seconds:.1f}s "
                 f"replay={replay_seconds:.1f}s update={update_seconds:.1f}s"
                 f"{replay_text}{gpu_text}"
             )
