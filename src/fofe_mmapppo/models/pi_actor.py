@@ -160,9 +160,16 @@ class PIActor(nn.Module):
         # to action logits. PI reasoning is a residual augmentation instead of
         # the only entity-to-action path.
         reactive_in = SELF_DIM + c.n_entities * (ENTITY_DIM + 1 + EVIDENCE_META_DIM)
+        # Match the proven MAPPO baseline's two-hidden-layer depth so the
+        # direct path is not a weaker bottleneck than the baseline it is meant
+        # to recover.  The structured input is richer, but remains entirely
+        # decentralized.
+        tanh_gain = nn.init.calculate_gain("tanh")
         self.current_evidence_head = nn.Sequential(
-            _linear(reactive_in, c.reactive_dim, gain=math.sqrt(2.0)),
-            nn.SiLU(),
+            _linear(reactive_in, c.reactive_dim, gain=tanh_gain),
+            nn.Tanh(),
+            _linear(c.reactive_dim, c.reactive_dim, gain=tanh_gain),
+            nn.Tanh(),
             _linear(c.reactive_dim, len(self.ACTION_VALUES), gain=0.01),
         )
         # Unknown targets have no invented position; their absence is encoded
@@ -174,7 +181,12 @@ class PIActor(nn.Module):
         )
         # Start the difficult counterfactual PI path as a small learnable
         # residual while basic reactive control is being acquired.
-        self._pi_residual_logit = nn.Parameter(torch.tensor(-2.1972246))
+        # ReZero-style residual gate: start the expensive PI branch at exactly
+        # zero contribution, with unit gradient through the scalar gate.  This
+        # guarantees that untrained counterfactual reasoning cannot corrupt the
+        # baseline-capacity direct policy at initialization; PI reasoning is
+        # admitted only as PPO finds it useful.
+        self._pi_residual_gate = nn.Parameter(torch.tensor(0.0))
         self._search_residual_logit = nn.Parameter(torch.tensor(-0.8472979))
 
         self._dispersion_gain = nn.Parameter(torch.tensor(-2.0))
@@ -700,7 +712,7 @@ class PIActor(nn.Module):
             next_state,
         )
         pi_residual = task_value + cognitive_gate * info_value
-        pi_residual_scale = torch.sigmoid(self._pi_residual_logit)
+        pi_residual_scale = torch.tanh(self._pi_residual_gate)
         search_residual_scale = torch.sigmoid(self._search_residual_logit)
         logits = (
             reactive_logits
