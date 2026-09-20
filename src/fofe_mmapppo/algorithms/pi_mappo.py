@@ -35,12 +35,12 @@ class PIMAPPOConfig:
     gamma: float = 0.95
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.1
-    ppo_epochs: int = 15
-    learning_rate: float = 4e-5
+    ppo_epochs: int = 4
+    learning_rate: float = 8e-5
     actor_learning_rate: float | None = None
     critic_learning_rate: float | None = None
     hidden_dim: int = 256
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.005
     value_coef: float = 0.5
     max_grad_norm: float = 0.5
     sequence_env_minibatch_size: int = 4
@@ -556,7 +556,7 @@ class PIMAPPO:
 
     def checkpoint(self, include_optimizers: bool = False) -> dict:
         checkpoint = {
-            "algorithm": "pi_mappo_v1",
+            "algorithm": "pi_mappo_v2_capacity_first",
             "config": asdict(self.config),
             "actor_config": asdict(self.actor_config),
             "n_agents": self.n_agents,
