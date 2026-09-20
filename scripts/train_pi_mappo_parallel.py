@@ -203,7 +203,7 @@ def main() -> None:
     )
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=200)
-    parser.add_argument("--ppo-epochs", type=int, default=1)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument(
         "--sequence-env-minibatch-size",
         type=int,
@@ -219,6 +219,7 @@ def main() -> None:
     parser.add_argument("--belief-dim", type=int, default=64)
     parser.add_argument("--context-dim", type=int, default=32)
     parser.add_argument("--relation-dim", type=int, default=64)
+    parser.add_argument("--reactive-dim", type=int, default=256)
     parser.add_argument(
         "--replay-check-every",
         type=int,
@@ -272,6 +273,7 @@ def main() -> None:
         "belief-dim": args.belief_dim,
         "context-dim": args.context_dim,
         "relation-dim": args.relation_dim,
+        "reactive-dim": args.reactive_dim,
         "gpu-monitor-interval": args.gpu_monitor_interval,
     }
     for name, value in positive.items():
@@ -318,10 +320,16 @@ def main() -> None:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         start_episode = int(checkpoint.get("episode", 0))
         checkpoint_scenario = str(checkpoint.get("scenario", "contested"))
-        if checkpoint_scenario != args.scenario:
+        if checkpoint_scenario != args.scenario and not args.warm_start_actors_only:
             parser.error(
                 f"checkpoint scenario={checkpoint_scenario!r} does not match "
-                f"--scenario={args.scenario!r}"
+                f"--scenario={args.scenario!r}; use --warm-start-actors-only "
+                "for an intentional curriculum transfer"
+            )
+        if checkpoint_scenario != args.scenario and args.warm_start_actors_only:
+            print(
+                f"curriculum_transfer={checkpoint_scenario}->{args.scenario} "
+                "actors_only=true; critic/optimizers reset"
             )
         checkpoint_steps = int(checkpoint.get("max_steps", args.max_steps))
         if checkpoint_steps != args.max_steps:
@@ -350,8 +358,8 @@ def main() -> None:
         if args.entropy_coef is not None:
             cfg.entropy_coef = args.entropy_coef
     else:
-        learning_rate = 4e-5 if args.learning_rate is None else args.learning_rate
-        entropy_coef = 0.01 if args.entropy_coef is None else args.entropy_coef
+        learning_rate = 8e-5 if args.learning_rate is None else args.learning_rate
+        entropy_coef = 0.005 if args.entropy_coef is None else args.entropy_coef
         cfg = PIMAPPOConfig(
             ppo_epochs=args.ppo_epochs,
             learning_rate=learning_rate,
@@ -366,6 +374,7 @@ def main() -> None:
             belief_dim=args.belief_dim,
             context_dim=args.context_dim,
             relation_dim=args.relation_dim,
+            reactive_dim=args.reactive_dim,
             max_age=float(args.max_steps),
         )
 
@@ -415,6 +424,10 @@ def main() -> None:
         f"device={device} scenario={args.scenario} num_envs={args.num_envs} "
         f"max_steps={args.max_steps} ppo_epochs={cfg.ppo_epochs} "
         f"seq_env_mb={cfg.sequence_env_minibatch_size} horizon={actor_cfg.horizon} "
+        f"reactive_dim={actor_cfg.reactive_dim} "
+        f"actor_lr={cfg.actor_learning_rate or cfg.learning_rate:g} "
+        f"critic_lr={cfg.critic_learning_rate or cfg.learning_rate:g} "
+        f"entropy={cfg.entropy_coef:g} "
         f"actor_params/agent={actor_params:,} critic_params/agent={critic_params:,}"
     )
     print(
