@@ -40,37 +40,12 @@ capacity before contested-information effects were even isolated.
 
 ## Recommended first run
 
-Do not resume V1 weights. Start V2 from scratch.
-
-Stage 1 learns basic mission control on the reference scenario:
-
-```bash
-python scripts/train_pi_mappo_parallel.py \
-  --episodes 4000 \
-  --scenario reference \
-  --reward-profile paper \
-  --num-envs 16 \
-  --device cuda \
-  --ppo-epochs 4 \
-  --sequence-env-minibatch-size 8 \
-  --actor-learning-rate 8e-5 \
-  --critic-learning-rate 1e-4 \
-  --entropy-coef 0.005 \
-  --batch-actor-updates \
-  --actor-batch-size 8 \
-  --save-every 500 \
-  --log-every 16 \
-  --output outputs/pi_v2_reference_4000
-```
-
-Stage 2 transfers only the V2 actors into the contested scenario and relearns
-the centralized critic under the harder dynamics:
+Do not resume V1 weights. Start V2 from scratch directly on the contested
+scenario so the main comparison is not confounded by curriculum pretraining.
 
 ```bash
 python scripts/train_pi_mappo_parallel.py \
-  --episodes 12000 \
-  --resume outputs/pi_v2_reference_4000/checkpoint_004000.pt \
-  --warm-start-actors-only \
+  --episodes 8000 \
   --scenario contested \
   --reward-profile paper \
   --num-envs 16 \
@@ -84,11 +59,18 @@ python scripts/train_pi_mappo_parallel.py \
   --actor-batch-size 8 \
   --save-every 500 \
   --log-every 16 \
-  --output outputs/pi_v2_contested_12000
+  --output outputs/pi_v2_contested_8000
 ```
 
-The stage-2 final global episode number is 12000, so this adds 8000 contested
-episodes after the 4000-episode reference curriculum.
+Keep the original paper reward for this restart. The previous task_aligned
+profile is intentionally not used because its large early-death penalty and
+weak cumulative time pressure pushed learning toward survival rather than
+mission completion.
+
+If direct contested training still cannot establish basic task capacity, the
+trainer also supports an explicit reference-to-contested actor curriculum using
+--warm-start-actors-only. That is a fallback training strategy, not the primary
+run.
 
 ## Intended ablations later
 
