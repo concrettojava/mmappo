@@ -9,6 +9,9 @@ capacity before contested-information effects were even isolated.
    - The actor now has a direct feed-forward path from the complete current
      decentralized structured observation (self state, stable entity slots,
      evidence mask, evidence metadata) to the seven action logits.
+   - V2.1 strengthens this path to two hidden layers of width 256, matching the
+     proven MAPPO baseline actor depth so the "capacity-first" route is not a
+     weaker representational bottleneck than the baseline.
    - This path does not use centralized truth or future simulator state.
 
 2. **Explicit first-discovery/search state**
@@ -20,18 +23,23 @@ capacity before contested-information effects were even isolated.
 
 3. **PI reasoning becomes a residual**
    - Physical/information future reasoning is preserved.
-   - Its contribution starts at about 0.10 of the logit residual and is
-     learnable.
-   - The search residual starts at about 0.30 and is learnable.
-   - This lets PPO first acquire competent reactive control instead of forcing
-     basic pursuit/avoidance to be learned through the full counterfactual
-     lattice.
+   - V2.1 uses a ReZero-style learnable gate: the PI contribution starts at
+     exactly zero, so untrained counterfactual reasoning cannot perturb the
+     direct policy at initialization. The scalar gate itself receives gradient
+     immediately and admits the PI branch as training finds it useful.
+   - The search residual still starts at about 0.30 and is learnable; its final
+     action layer is small-initialized.
+   - This makes the capacity-first claim explicit: PPO can first acquire basic
+     pursuit/avoidance/task control through the direct path, then add PI
+     reasoning rather than learning both simultaneously from noisy logits.
 
 4. **Stronger PPO defaults**
    - PPO epochs: 4 (was effectively 1 in the trainer CLI).
    - Base learning rate: 8e-5 (was 4e-5).
    - Entropy coefficient: 0.005 (was 0.01).
-   - Checkpoints identify themselves as pi_mappo_v2_capacity_first.
+   - V2.1 checkpoints identify themselves as pi_mappo_v2_1_capacity_first.
+   - Training logs expose the torch.compile backend plus PI/search residual
+     scales so the long run shows whether the reasoning branch actually opens.
 
 5. **Curriculum transfer support**
    - --warm-start-actors-only may intentionally move a V2 actor from
