@@ -1,0 +1,79 @@
+{
+  "protocol": {
+    "scenario": "reference",
+    "episodes": 128,
+    "seed_start": 50000,
+    "seed_end": 50127,
+    "deterministic": true,
+    "batch_size": 16,
+    "device": "cuda",
+    "return_comparison_note": "Compare mean_agent_return only within the same reward_profile. Task metrics are the primary cross-profile comparison."
+  },
+  "checkpoints": [
+    {
+      "label": "pi_mappo_ep007000_checkpoint_007000",
+      "checkpoint": "outputs/pi_batched_2000/checkpoint_007000.pt",
+      "algorithm": "pi_mappo",
+      "checkpoint_episode": 7000,
+      "reward_profile": "paper",
+      "max_steps": 200,
+      "compile_actors": false,
+      "scenario": "reference",
+      "seed_start": 50000,
+      "seed_end": 50127,
+      "deterministic": true,
+      "summary": {
+        "episodes": 128,
+        "completion_ratio": {
+          "n": 128,
+          "mean": 0.384765625,
+          "std": 0.24980919232157847,
+          "ci95": 0.04327723460386402
+        },
+        "full_success_rate": {
+          "n": 128,
+          "mean": 0.0390625,
+          "std": 0.19374369949433196,
+          "ci95": 0.03356438351252965
+        },
+        "survival_ratio": {
+          "n": 128,
+          "mean": 0.775390625,
+          "std": 0.15417320993645223,
+          "ci95": 0.02670914594472383
+        },
+        "steps": {
+          "n": 128,
+          "mean": 198.0,
+          "std": 10.60144447705123,
+          "ci95": 1.836606553623421
+        },
+        "success_completion_steps": {
+          "n": 5,
+          "mean": 148.8,
+          "std": 18.925115587493778,
+          "ci95": 16.588595214785364
+        },
+        "targets_destroyed": {
+          "n": 128,
+          "mean": 1.5390625,
+          "std": 0.9992367692863139,
+          "ci95": 0.17310893841545608
+        },
+        "mean_agent_return": {
+          "n": 128,
+          "mean": -784.1411647796631,
+          "std": 155.80284790995836,
+          "ci95": 26.991466319900425
+        },
+        "targets_destroyed_distribution": {
+          "0": 17,
+          "1": 51,
+          "2": 39,
+          "3": 16,
+          "4": 5
+        }
+      }
+    }
+  ]
+}
