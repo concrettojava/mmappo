@@ -1,0 +1,78 @@
+{
+  "protocol": {
+    "scenario": "reference",
+    "episodes": 128,
+    "seed_start": 50000,
+    "seed_end": 50127,
+    "deterministic": true,
+    "batch_size": 16,
+    "device": "cuda",
+    "return_comparison_note": "Compare mean_agent_return only within the same reward_profile. Task metrics are the primary cross-profile comparison."
+  },
+  "checkpoints": [
+    {
+      "label": "mappo_ep032000_checkpoint_032000",
+      "checkpoint": "/home/fofe_mmapppo_scene_stage1/outputs/mappo_32000_from_scratch/checkpoint_032000.pt",
+      "algorithm": "mappo",
+      "checkpoint_episode": 32000,
+      "reward_profile": "paper",
+      "max_steps": 200,
+      "scenario": "reference",
+      "seed_start": 50000,
+      "seed_end": 50127,
+      "deterministic": true,
+      "summary": {
+        "episodes": 128,
+        "completion_ratio": {
+          "n": 128,
+          "mean": 0.748046875,
+          "std": 0.21078372577771362,
+          "ci95": 0.03651641745599081
+        },
+        "full_success_rate": {
+          "n": 128,
+          "mean": 0.3125,
+          "std": 0.46351240544347894,
+          "ci95": 0.08029942743802723
+        },
+        "survival_ratio": {
+          "n": 128,
+          "mean": 0.7763671875,
+          "std": 0.17928102377507732,
+          "ci95": 0.031058852774108837
+        },
+        "steps": {
+          "n": 128,
+          "mean": 180.03125,
+          "std": 34.98525079855081,
+          "ci95": 6.060885479886
+        },
+        "success_completion_steps": {
+          "n": 40,
+          "mean": 136.1,
+          "std": 33.309007790686294,
+          "ci95": 10.322568459448453
+        },
+        "targets_destroyed": {
+          "n": 128,
+          "mean": 2.9921875,
+          "std": 0.8431349031108545,
+          "ci95": 0.14606566982396324
+        },
+        "mean_agent_return": {
+          "n": 128,
+          "mean": -313.2382456064224,
+          "std": 93.56690220302094,
+          "ci95": 16.20963880538178
+        },
+        "targets_destroyed_distribution": {
+          "0": 0,
+          "1": 5,
+          "2": 31,
+          "3": 52,
+          "4": 40
+        }
+      }
+    }
+  ]
+}
