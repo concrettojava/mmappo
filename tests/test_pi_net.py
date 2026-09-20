@@ -136,8 +136,9 @@ class PIActorTests(unittest.TestCase):
         self.assertEqual(tuple(aux["reactive_logits"].shape), (self.B, 7))
         self.assertEqual(tuple(aux["search_logits"].shape), (self.B, 7))
         self.assertEqual(tuple(aux["discovery_stats"].shape), (self.B, 8))
-        self.assertGreater(float(aux["pi_residual_scale"]), 0.0)
-        self.assertLess(float(aux["pi_residual_scale"]), 0.2)
+        self.assertAlmostEqual(float(aux["pi_residual_scale"]), 0.0, places=7)
+        self.assertGreater(float(aux["search_residual_scale"]), 0.0)
+        self.assertLess(float(aux["search_residual_scale"]), 0.5)
 
     def test_unknown_targets_are_explicit_in_discovery_state(self):
         empty_entities = torch.zeros_like(self.entities)
@@ -264,7 +265,22 @@ class PIActorTests(unittest.TestCase):
         grads = [p.grad for p in self.actor.parameters() if p.requires_grad and p.grad is not None]
         self.assertGreater(len(grads), 0)
         self.assertTrue(all(torch.isfinite(g).all() for g in grads))
-        self.assertIsNotNone(self.actor.task_heads[0][0].weight.grad)
+        # The zero-initialized ReZero gate itself must receive gradient even
+        # while the PI residual branch is initially prevented from perturbing
+        # the direct policy.
+        self.assertIsNotNone(self.actor._pi_residual_gate.grad)
+        self.assertTrue(torch.isfinite(self.actor._pi_residual_gate.grad))
+
+    def test_pi_branch_receives_gradient_after_gate_opens(self):
+        with torch.no_grad():
+            self.actor._pi_residual_gate.fill_(0.1)
+        logits, _, _ = self.actor(
+            self.self_features, self.entities, self.mask, self.meta
+        )
+        logits.square().mean().backward()
+        grad = self.actor.task_heads[0][0].weight.grad
+        self.assertIsNotNone(grad)
+        self.assertTrue(torch.isfinite(grad).all())
 
     def test_reset_where_clears_only_selected_environments(self):
         _, state, _ = self.actor(
