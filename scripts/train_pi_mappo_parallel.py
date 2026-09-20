@@ -25,6 +25,8 @@ import json
 import math
 from pathlib import Path
 import random
+import socket
+import subprocess
 import sys
 import time
 
@@ -76,6 +78,51 @@ def parameter_count(module: torch.nn.Module) -> int:
     return sum(int(p.numel()) for p in module.parameters() if p.requires_grad)
 
 
+def start_tensorboard(log_dir: Path, host: str, requested_port: int):
+    """Start a local TensorBoard for this run and return its process and URL."""
+    port = requested_port
+    for candidate in range(requested_port, requested_port + 20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((host, candidate))
+            except OSError:
+                continue
+        port = candidate
+        break
+    else:
+        raise RuntimeError(
+            f"no free TensorBoard port in {requested_port}..{requested_port + 19}"
+        )
+
+    server_log = (log_dir.parent / "tensorboard_server.log").open("a", encoding="utf-8")
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "tensorboard.main",
+            "--logdir",
+            str(log_dir),
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=server_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+    def stop_tensorboard() -> None:
+        if process.poll() is None:
+            process.terminate()
+        server_log.close()
+
+    atexit.register(stop_tensorboard)
+    display_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+    return process, f"http://{display_host}:{port}"
+
+
 def assert_finite_array(name: str, value: np.ndarray) -> None:
     if not np.isfinite(value).all():
         bad = int(np.size(value) - np.isfinite(value).sum())
@@ -101,6 +148,7 @@ def save_checkpoint(
     num_envs: int,
     scenario: str,
     max_steps: int,
+    reward_profile: str,
 ) -> None:
     torch.save(
         {
@@ -109,6 +157,7 @@ def save_checkpoint(
             "parallel_num_envs": int(num_envs),
             "scenario": str(scenario),
             "max_steps": int(max_steps),
+            "reward_profile": str(reward_profile),
             "fixed_vectorizer": {
                 "world_size": fixed.world_size,
                 "n_uavs": fixed.n_uavs,
@@ -137,11 +186,21 @@ def main() -> None:
                         help="batch independent actor updates (default: enabled on CUDA)")
     parser.add_argument("--episodes", type=int, default=64, help="final global episode number")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--warm-start-actors-only",
+        action="store_true",
+        help="load actor weights from --resume while resetting critics and all optimizers",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--cuda-memory-fraction", type=float, default=None,
                         help="optional PyTorch allocation ceiling as a fraction of GPU memory")
     parser.add_argument("--scenario", choices=("reference", "contested"), default="contested")
+    parser.add_argument(
+        "--reward-profile",
+        choices=("paper", "task_aligned"),
+        default="paper",
+    )
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--ppo-epochs", type=int, default=1)
@@ -151,8 +210,10 @@ def main() -> None:
         default=8,
         help="environment sequences per PPO minibatch; 8 is the throughput default",
     )
-    parser.add_argument("--learning-rate", type=float, default=4e-5)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--actor-learning-rate", type=float, default=None)
+    parser.add_argument("--critic-learning-rate", type=float, default=None)
+    parser.add_argument("--entropy-coef", type=float, default=None)
     parser.add_argument("--critic-hidden-dim", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=8)
     parser.add_argument("--belief-dim", type=int, default=64)
@@ -179,11 +240,27 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=32)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs" / "pi_mappo_smoke")
     parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument(
+        "--launch-tensorboard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="start a local TensorBoard while training (default: enabled)",
+    )
+    parser.add_argument("--tensorboard-host", default="127.0.0.1")
+    parser.add_argument("--tensorboard-port", type=int, default=6006)
     parser.add_argument("--phase-progress", action="store_true",
                         help="print collection/update phase starts, including cold compilation")
     args = parser.parse_args()
     if args.cuda_memory_fraction is not None and not 0 < args.cuda_memory_fraction <= 1:
         parser.error("cuda-memory-fraction must be in (0, 1]")
+    if args.warm_start_actors_only and args.resume is None:
+        parser.error("--warm-start-actors-only requires --resume")
+    for name in ("learning_rate", "actor_learning_rate", "critic_learning_rate"):
+        value = getattr(args, name)
+        if value is not None and value <= 0:
+            parser.error(f"{name.replace('_', '-')} must be positive")
+    if args.entropy_coef is not None and args.entropy_coef < 0:
+        parser.error("entropy-coef must be non-negative")
 
     positive = {
         "episodes": args.episodes,
@@ -202,6 +279,8 @@ def main() -> None:
             parser.error(f"{name} must be positive")
     if args.replay_check_every < 0:
         parser.error("replay-check-every must be non-negative")
+    if not 1 <= args.tensorboard_port <= 65535:
+        parser.error("tensorboard-port must be in [1, 65535]")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -217,6 +296,7 @@ def main() -> None:
         seed=args.seed,
         scenario=args.scenario,
         max_steps=args.max_steps,
+        reward_profile=args.reward_profile,
     )
     fixed = FixedVectorizer(
         world_size=probe.world_size,
@@ -248,18 +328,37 @@ def main() -> None:
             parser.error(
                 f"checkpoint max_steps={checkpoint_steps} does not match --max-steps={args.max_steps}"
             )
+        checkpoint_reward_profile = str(checkpoint.get("reward_profile", "paper"))
+        if not args.warm_start_actors_only and checkpoint_reward_profile != args.reward_profile:
+            parser.error(
+                f"checkpoint reward_profile={checkpoint_reward_profile!r} does not match "
+                f"--reward-profile={args.reward_profile!r}; use --warm-start-actors-only "
+                "to intentionally change the objective"
+            )
         cfg = PIMAPPOConfig(**checkpoint.get("config", {}))
         actor_cfg = PIActorConfig(**checkpoint.get("actor_config", {}))
         # Runtime batching/epoch count may be changed safely on resume; actor
         # architecture must remain exactly checkpoint-compatible.
         cfg.ppo_epochs = args.ppo_epochs
         cfg.sequence_env_minibatch_size = args.sequence_env_minibatch_size
+        if args.learning_rate is not None:
+            cfg.learning_rate = args.learning_rate
+        if args.actor_learning_rate is not None:
+            cfg.actor_learning_rate = args.actor_learning_rate
+        if args.critic_learning_rate is not None:
+            cfg.critic_learning_rate = args.critic_learning_rate
+        if args.entropy_coef is not None:
+            cfg.entropy_coef = args.entropy_coef
     else:
+        learning_rate = 4e-5 if args.learning_rate is None else args.learning_rate
+        entropy_coef = 0.01 if args.entropy_coef is None else args.entropy_coef
         cfg = PIMAPPOConfig(
             ppo_epochs=args.ppo_epochs,
-            learning_rate=args.learning_rate,
+            learning_rate=learning_rate,
+            actor_learning_rate=args.actor_learning_rate,
+            critic_learning_rate=args.critic_learning_rate,
             hidden_dim=args.critic_hidden_dim,
-            entropy_coef=args.entropy_coef,
+            entropy_coef=entropy_coef,
             sequence_env_minibatch_size=args.sequence_env_minibatch_size,
         )
         actor_cfg = PIActorConfig(
@@ -285,8 +384,12 @@ def main() -> None:
         device=device,
     )
     if checkpoint is not None:
-        restored_opt = learner.load_checkpoint(checkpoint, load_optimizers=True)
-        status = "restored" if restored_opt else "restarted (checkpoint has no optimizer state)"
+        if args.warm_start_actors_only:
+            learner.actors.load_state_dict(checkpoint["actors"])
+            status = "actors restored; critics and optimizers reset"
+        else:
+            restored_opt = learner.load_checkpoint(checkpoint, load_optimizers=True)
+            status = "restored" if restored_opt else "restarted (checkpoint has no optimizer state)"
         print(f"resume={args.resume} episode={start_episode} optimizer={status}")
 
     gpu_monitor = GPUPhaseMonitor(device, interval_seconds=args.gpu_monitor_interval)
@@ -296,9 +399,15 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output / "metrics.jsonl"
     writer = None
+    tensorboard_url = None
     if not args.no_tensorboard:
-        writer = SummaryWriter(log_dir=str(args.output / "tensorboard"))
+        tensorboard_dir = args.output / "tensorboard"
+        writer = SummaryWriter(log_dir=str(tensorboard_dir))
         atexit.register(writer.close)
+        if args.launch_tensorboard:
+            _, tensorboard_url = start_tensorboard(
+                tensorboard_dir, args.tensorboard_host, args.tensorboard_port
+            )
 
     actor_params = parameter_count(learner.actors[0])
     critic_params = parameter_count(learner.critics[0])
@@ -318,6 +427,8 @@ def main() -> None:
     )
     if writer is not None:
         print(f"tensorboard={args.output / 'tensorboard'}")
+        if tensorboard_url is not None:
+            print(f"tensorboard_url={tensorboard_url}")
 
     recent_returns: list[float] = []
     processed = start_episode
@@ -340,6 +451,7 @@ def main() -> None:
                 seed=args.seed + int(ep) - 1,
                 scenario=args.scenario,
                 max_steps=args.max_steps,
+                reward_profile=args.reward_profile,
             )
             for ep in episode_ids
         ]
@@ -470,6 +582,7 @@ def main() -> None:
             record = {
                 "episode": int(episode_id),
                 "scenario": args.scenario,
+                "reward_profile": args.reward_profile,
                 "mean_return": mean_return,
                 "steps": int(info["step"]),
                 "completion_ratio": float(info["completion_ratio"]),
@@ -485,11 +598,14 @@ def main() -> None:
                 record.update({f"replay_{k}": float(v) for k, v in replay_diag.items()})
             records.append(record)
             if writer is not None:
-                writer.add_scalar("train/mean_return", mean_return, episode_id)
-                writer.add_scalar("train/avg100_return", avg100, episode_id)
-                writer.add_scalar("task/completion_ratio", record["completion_ratio"], episode_id)
-                writer.add_scalar("task/survival_ratio", record["survival_ratio"], episode_id)
-                writer.add_scalar("task/episode_steps", record["steps"], episode_id)
+                writer.add_scalar("episode/reward", mean_return, episode_id)
+                writer.add_scalar(
+                    "episode/completion_ratio", record["completion_ratio"], episode_id
+                )
+                writer.add_scalar(
+                    "episode/survival_ratio", record["survival_ratio"], episode_id
+                )
+                writer.add_scalar("episode/steps", record["steps"], episode_id)
 
         with metrics_path.open("a", encoding="utf-8") as f:
             f.writelines(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
@@ -504,40 +620,6 @@ def main() -> None:
         if writer is not None:
             writer.add_scalar("loss/actor", losses["actor_loss"], processed)
             writer.add_scalar("loss/critic", losses["critic_loss"], processed)
-            writer.add_scalar("policy/entropy", losses["entropy"], processed)
-            writer.add_scalar("policy/ratio_mean", losses["ratio_mean"], processed)
-            writer.add_scalar("policy/clip_fraction", losses["clip_fraction"], processed)
-            writer.add_scalar("performance/episodes_per_second", speed, processed)
-            writer.add_scalar("performance/seconds_per_episode", sec_per_ep, processed)
-            writer.add_scalar("performance/collect_seconds", collect_seconds, processed)
-            writer.add_scalar("performance/replay_seconds", replay_seconds, processed)
-            writer.add_scalar("performance/update_seconds", update_seconds, processed)
-            for phase, stats in (
-                ("collect", collect_gpu_stats),
-                ("replay", replay_gpu_stats),
-                ("update", update_gpu_stats),
-            ):
-                writer.add_scalar(f"gpu/{phase}_util_avg_pct", stats.util_avg_pct, processed)
-                writer.add_scalar(f"gpu/{phase}_util_max_pct", stats.util_max_pct, processed)
-                writer.add_scalar(f"gpu/{phase}_vram_peak_mib", stats.vram_peak_mib, processed)
-                writer.add_scalar(
-                    f"gpu/{phase}_torch_peak_allocated_mib",
-                    stats.torch_peak_allocated_mib,
-                    processed,
-                )
-                writer.add_scalar(
-                    f"gpu/{phase}_torch_peak_reserved_mib",
-                    stats.torch_peak_reserved_mib,
-                    processed,
-                )
-                writer.add_scalar(f"gpu/{phase}_power_avg_w", stats.power_avg_w, processed)
-                writer.add_scalar(f"gpu/{phase}_temp_max_c", stats.temp_max_c, processed)
-            if replay_diag is not None:
-                writer.add_scalar(
-                    "correctness/preupdate_max_ratio_error",
-                    replay_diag["max_abs_ratio_error"],
-                    processed,
-                )
 
         if processed == args.episodes or processed - last_log_episode >= args.log_every:
             last = records[-1]
@@ -567,8 +649,6 @@ def main() -> None:
                 f"{replay_text}{gpu_text}"
             )
             if writer is not None:
-                writer.add_scalar("task/batch_completion_ratio", batch_completion, processed)
-                writer.add_scalar("task/batch_survival_ratio", batch_survival, processed)
                 writer.flush()
             if not header.enabled:
                 header.plain_status_if_needed()
@@ -584,6 +664,7 @@ def main() -> None:
                 args.num_envs,
                 args.scenario,
                 args.max_steps,
+                args.reward_profile,
             )
 
     header.close()

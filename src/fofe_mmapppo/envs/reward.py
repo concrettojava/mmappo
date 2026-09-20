@@ -27,6 +27,13 @@ LAMBDA_ABILITY = 1.0
 LAMBDA_ACTION = 0.25
 LAMBDA_BOUND = 1.0
 
+# The paper profile remains unchanged for reproduction.  The task-aligned
+# profile removes the incentive to terminate an agent early merely to avoid
+# the remaining per-step costs, and gives successful mission termination an
+# explicit reward.
+TASK_COMPLETION_BONUS = 100.0
+TASK_EARLY_DEATH_COST_PER_STEP = 4.0
+
 ABILITY_RATIOS = {
     "Stk": {"Stk": 0.7, "Rec": 0.2, "Com": 0.1},
     "Rec": {"Stk": 0.1, "Rec": 0.7, "Com": 0.2},
@@ -129,6 +136,15 @@ def build_reward_context(env, previous_action_u: Mapping[int, float]) -> RewardC
 def mission_reward(env) -> float:
     alive_targets = sum(t.alive for t in env.targets)
     alive_uavs = sum(u.alive for u in env.uavs)
+    if getattr(env, "reward_profile", "paper") == "task_aligned":
+        time_term = -LAMBDA_TIME * env.dt
+        completion = TASK_COMPLETION_BONUS if alive_targets == 0 else 0.0
+        return (
+            time_term
+            - general_reward(alive_targets, len(env.targets))
+            + general_reward(alive_uavs, len(env.uavs))
+            + completion
+        )
     return (
         -LAMBDA_TIME * (env.step_count * env.dt)
         - general_reward(alive_targets, len(env.targets))
@@ -220,6 +236,12 @@ def boundary_reward(env, uav) -> float:
 def ability_reward(env, uav, ctx: RewardContext, newly_destroyed: Set[int]):
     r_avoid = avoidance_reward(env, uav, ctx)
     r_destroy = -50.0 if uav.idx in newly_destroyed else 0.0
+    if (
+        uav.idx in newly_destroyed
+        and getattr(env, "reward_profile", "paper") == "task_aligned"
+    ):
+        remaining = max(0, int(env.max_steps) - int(env.step_count))
+        r_destroy -= TASK_EARLY_DEATH_COST_PER_STEP * remaining
     r_stk = strike_reward(env, uav, ctx)
     r_rec = reconnaissance_reward(env, uav, ctx)
     r_com = communication_reward(env, uav, ctx)

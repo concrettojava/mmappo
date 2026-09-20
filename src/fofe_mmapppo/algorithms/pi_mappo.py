@@ -37,6 +37,8 @@ class PIMAPPOConfig:
     clip_epsilon: float = 0.1
     ppo_epochs: int = 15
     learning_rate: float = 4e-5
+    actor_learning_rate: float | None = None
+    critic_learning_rate: float | None = None
     hidden_dim: int = 256
     entropy_coef: float = 0.01
     value_coef: float = 0.5
@@ -83,15 +85,26 @@ class PIMAPPO:
             [MLPCritic(state_dim, self.config.hidden_dim) for _ in range(self.n_agents)]
         ).to(self.device)
 
-        adam_kwargs = {
-            "lr": self.config.learning_rate,
+        actor_lr = (
+            self.config.learning_rate
+            if self.config.actor_learning_rate is None
+            else self.config.actor_learning_rate
+        )
+        critic_lr = (
+            self.config.learning_rate
+            if self.config.critic_learning_rate is None
+            else self.config.critic_learning_rate
+        )
+        common_adam_kwargs = {
             "fused": bool(self.config.fused_adam and self.device.type == "cuda"),
         }
         self.actor_optimizers = [
-            torch.optim.Adam(actor.parameters(), **adam_kwargs) for actor in self.actors
+            torch.optim.Adam(actor.parameters(), lr=actor_lr, **common_adam_kwargs)
+            for actor in self.actors
         ]
         self.critic_optimizers = [
-            torch.optim.Adam(critic.parameters(), **adam_kwargs) for critic in self.critics
+            torch.optim.Adam(critic.parameters(), lr=critic_lr, **common_adam_kwargs)
+            for critic in self.critics
         ]
 
         disable_compile = os.environ.get("PI_DISABLE_TORCH_COMPILE", "").strip().lower()

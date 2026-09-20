@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -49,7 +51,7 @@ class PITrainingScriptSmokeTests(unittest.TestCase):
                 "cpu",
                 "--scenario",
                 "contested",
-                "--no-tensorboard",
+                "--no-launch-tensorboard",
                 "--output",
                 str(output),
             ]
@@ -76,6 +78,20 @@ class PITrainingScriptSmokeTests(unittest.TestCase):
             self.assertTrue(all(record["replay_max_abs_ratio_error"] < 1e-4 for record in records))
             self.assertTrue(all(0.0 <= record["clip_fraction"] <= 1.0 for record in records))
             self.assertTrue(all(record["rollout_steps"] == 4 for record in records))
+
+            events = EventAccumulator(str(output / "tensorboard"))
+            events.Reload()
+            self.assertEqual(
+                set(events.Tags()["scalars"]),
+                {
+                    "episode/reward",
+                    "episode/completion_ratio",
+                    "episode/survival_ratio",
+                    "episode/steps",
+                    "loss/actor",
+                    "loss/critic",
+                },
+            )
 
 
 if __name__ == "__main__":

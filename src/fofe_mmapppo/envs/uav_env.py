@@ -8,6 +8,7 @@ from . import dynamics, communication, combat, observation, state, reward
 
 
 SCENARIOS = ("reference", "contested")
+REWARD_PROFILES = ("paper", "task_aligned")
 
 
 class CooperativeUAVEnv:
@@ -35,6 +36,7 @@ class CooperativeUAVEnv:
         threat_eta: float = 1.8,
         paper_equation_yaw: bool = False,
         scenario: str = "reference",
+        reward_profile: str = "paper",
         jammer_count: int = 2,
         jammer_min_radius: float = 700.0,
         jammer_max_radius: float = 1000.0,
@@ -47,6 +49,10 @@ class CooperativeUAVEnv:
     ):
         if scenario not in SCENARIOS:
             raise ValueError(f"unknown scenario={scenario!r}; expected one of {SCENARIOS}")
+        if reward_profile not in REWARD_PROFILES:
+            raise ValueError(
+                f"unknown reward_profile={reward_profile!r}; expected one of {REWARD_PROFILES}"
+            )
         self.rng = np.random.default_rng(seed)
         self.seed = seed
         self.world_size = float(world_size)
@@ -57,6 +63,7 @@ class CooperativeUAVEnv:
         self.threat_eta = float(threat_eta)
         self.paper_equation_yaw = paper_equation_yaw
         self.scenario = scenario
+        self.reward_profile = reward_profile
 
         self.jammer_count = int(jammer_count)
         self.jammer_min_radius = float(jammer_min_radius)
