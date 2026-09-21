@@ -39,6 +39,20 @@ class ContestedScenarioTests(unittest.TestCase):
         self.assertGreaterEqual(env.communication_factor(u), env.contested_min_comm_factor)
         self.assertGreaterEqual(env.reconnaissance_factor(u), env.contested_min_recon_factor)
 
+    def test_only_self_observation_exposes_local_equipment_quality(self):
+        env = CooperativeUAVEnv(seed=5, scenario="contested")
+        env.reset(seed=5)
+        jammer = env.jammers[0]
+        u = env.uavs[0]
+        u.x, u.y = jammer["x"], jammer["y"]
+
+        self_record = env.get_observations()[u.idx]["self"]
+        self.assertEqual(self_record["comm_quality"], env.communication_factor(u))
+        self.assertEqual(self_record["recon_quality"], env.reconnaissance_factor(u))
+        for neighbor in env.get_observations()[u.idx]["neighbors"]:
+            self.assertNotIn("comm_quality", neighbor)
+            self.assertNotIn("recon_quality", neighbor)
+
     def test_direct_vectorizer_matches_structured_path_in_contested_scenario(self):
         env = CooperativeUAVEnv(seed=19, scenario="contested")
         base = FixedVectorizer()

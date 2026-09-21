@@ -52,7 +52,10 @@ This keeps the target physically slow (the reference target speed is unchanged) 
 - collision/threat/strike mechanics
 - reward function and coefficients
 - MAPPO architecture and hyperparameters
-- fixed-vector dimensions (obs=182, state=280)
+- fixed-vector dimensions (obs=184, state=280). The two new observation
+  entries are `comm_quality` and `recon_quality` in the observing UAV's
+  `self` record only; jammer truth and teammate quality measurements remain
+  hidden.
 
 Keeping these constant isolates the effect of information interruption and target nonstationarity.
 

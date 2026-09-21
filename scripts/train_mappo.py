@@ -125,6 +125,10 @@ def main():
         if not args.resume.exists():
             parser.error(f"resume checkpoint not found: {args.resume}")
         resume_checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        try:
+            FixedVectorizer.assert_checkpoint_compatible(resume_checkpoint)
+        except ValueError as exc:
+            parser.error(str(exc))
         completed_episode = int(resume_checkpoint.get("episode", 0))
         if args.episodes <= completed_episode:
             parser.error(
@@ -274,6 +278,7 @@ def main():
                 {
                     **learner.checkpoint(include_optimizers=True),
                     "episode": episode,
+                    "observation_schema_version": 2,
                     "vectorizer": {
                         "world_size": vectorizer.world_size,
                         "n_uavs": vectorizer.n_uavs,

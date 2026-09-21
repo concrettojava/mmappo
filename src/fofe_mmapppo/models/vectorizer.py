@@ -25,6 +25,7 @@ import numpy as np
 
 TYPE_ORDER = ("Stk", "Rec", "Com")
 TYPE_TO_INDEX = {name: i for i, name in enumerate(TYPE_ORDER)}
+OBSERVATION_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,11 @@ class FixedVectorizer:
         return 14
 
     @property
+    def self_dim(self) -> int:
+        """Own-UAV record size: regular UAV state plus two local qualities."""
+        return self.uav_dim + 2
+
+    @property
     def target_dim(self) -> int:
         return 10
 
@@ -49,7 +55,7 @@ class FixedVectorizer:
     @property
     def observation_dim(self) -> int:
         return (
-            self.uav_dim
+            self.self_dim
             + (self.n_uavs - 1) * self.uav_dim
             + self.n_targets * self.target_dim
             + self.n_threats * self.threat_dim
@@ -63,6 +69,17 @@ class FixedVectorizer:
             + self.n_targets * self.target_dim
             + self.n_threats * self.threat_dim
         )
+
+    @staticmethod
+    def assert_checkpoint_compatible(checkpoint: Mapping[str, Any]) -> None:
+        """Reject checkpoints trained before the self-quality schema change."""
+        version = checkpoint.get("observation_schema_version")
+        if version != OBSERVATION_SCHEMA_VERSION:
+            raise ValueError(
+                "checkpoint uses the legacy 182-dimensional observation schema; "
+                "it cannot be resumed or evaluated with the 184-dimensional "
+                "comm_quality/recon_quality schema. Retrain from scratch."
+            )
 
     def _write_pose(self, out: np.ndarray, offset: int, pose: Mapping[str, Any]) -> None:
         geo = pose["geo"]
@@ -85,6 +102,11 @@ class FixedVectorizer:
             out[offset + 2 + type_idx] = 1.0
         out[offset + 5] = 1.0 if record["alive"] else 0.0
         self._write_pose(out, offset + 6, record["pose"])
+
+    def _write_self(self, out: np.ndarray, offset: int, record: Mapping[str, Any]) -> None:
+        self._write_uav(out, offset, record)
+        out[offset + self.uav_dim] = float(record["comm_quality"])
+        out[offset + self.uav_dim + 1] = float(record["recon_quality"])
 
     def _write_target(self, out: np.ndarray, offset: int, record: Mapping[str, Any]) -> None:
         out[offset] = 1.0
@@ -124,6 +146,11 @@ class FixedVectorizer:
         self._write_uav(out, 0, record)
         return out
 
+    def _self(self, record: Mapping[str, Any]) -> np.ndarray:
+        out = np.zeros(self.self_dim, dtype=np.float32)
+        self._write_self(out, 0, record)
+        return out
+
     def _target(self, record: Mapping[str, Any]) -> np.ndarray:
         out = np.zeros(self.target_dim, dtype=np.float32)
         self._write_target(out, 0, record)
@@ -147,8 +174,8 @@ class FixedVectorizer:
         if obs is None:
             return
         p = 0
-        self._write_uav(out, p, obs["self"])
-        p += self.uav_dim
+        self._write_self(out, p, obs["self"])
+        p += self.self_dim
         self._write_records(out, p, obs["neighbors"], self.n_uavs - 1, self.uav_dim, self._write_uav)
         p += (self.n_uavs - 1) * self.uav_dim
         self._write_records(out, p, obs["targets"], self.n_targets, self.target_dim, self._write_target)

@@ -26,6 +26,7 @@ class DirectFixedVectorizer:
         self.observation_dim = int(base.observation_dim)
         self.state_dim = int(base.state_dim)
         self.uav_dim = int(base.uav_dim)
+        self.self_dim = int(base.self_dim)
         self.target_dim = int(base.target_dim)
         self.threat_dim = int(base.threat_dim)
 
@@ -122,7 +123,9 @@ class DirectFixedVectorizer:
                 active[observer_idx] = 1.0
                 p = 0
                 obs[observer_idx, p:p + self.uav_dim] = uav_records[observer_idx]
-                p += self.uav_dim
+                obs[observer_idx, p + self.uav_dim] = env.communication_factor(observer)
+                obs[observer_idx, p + self.uav_dim + 1] = env.reconnaissance_factor(observer)
+                p += self.self_dim
 
                 subgroup = components.get(observer_idx, {observer_idx})
                 row = 0

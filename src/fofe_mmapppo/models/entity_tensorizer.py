@@ -28,7 +28,7 @@ from ..envs.entities import TYPE_PARAMS
 from .vectorizer import TYPE_TO_INDEX
 
 
-SELF_DIM = 14
+SELF_DIM = 16
 ENTITY_DIM = 20
 EVIDENCE_META_DIM = 4
 
@@ -103,6 +103,8 @@ class EntityTensorizer:
             out[2 + type_idx] = 1.0
         out[5] = 1.0 if record.get("alive", True) else 0.0
         self._write_pose(out, 6, record["pose"])
+        out[14] = float(record["comm_quality"])
+        out[15] = float(record["recon_quality"])
         return out
 
     def _teammate_slot(self, observer_idx: int, other_idx: int) -> int:

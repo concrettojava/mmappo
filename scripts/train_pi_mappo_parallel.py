@@ -158,6 +158,7 @@ def save_checkpoint(
             "scenario": str(scenario),
             "max_steps": int(max_steps),
             "reward_profile": str(reward_profile),
+            "observation_schema_version": 2,
             "fixed_vectorizer": {
                 "world_size": fixed.world_size,
                 "n_uavs": fixed.n_uavs,
@@ -318,6 +319,10 @@ def main() -> None:
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        try:
+            FixedVectorizer.assert_checkpoint_compatible(checkpoint)
+        except ValueError as exc:
+            parser.error(str(exc))
         start_episode = int(checkpoint.get("episode", 0))
         checkpoint_scenario = str(checkpoint.get("scenario", "contested"))
         if checkpoint_scenario != args.scenario and not args.warm_start_actors_only:

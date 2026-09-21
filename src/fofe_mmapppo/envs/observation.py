@@ -29,6 +29,19 @@ def _uav_record(observer, uav) -> Dict[str, Any]:
     }
 
 
+def _self_record(env, observer) -> Dict[str, Any]:
+    """Return the observer-only record, including local equipment health.
+
+    The jammer field remains simulator-private. These values describe only the
+    observing UAV's local communication and reconnaissance equipment; they are
+    deliberately not attached to teammate records.
+    """
+    record = _uav_record(observer, observer)
+    record["comm_quality"] = float(env.communication_factor(observer))
+    record["recon_quality"] = float(env.reconnaissance_factor(observer))
+    return record
+
+
 def _target_record(observer, target) -> Dict[str, Any]:
     return {
         "idx": int(target.idx),
@@ -57,7 +70,7 @@ def _observation_from_shared(env, observer_idx: int, components, shared):
     subgroup = components.get(observer_idx, {observer_idx})
     visible_targets, visible_threats = shared[observer_idx]
     return {
-        "self": _uav_record(observer, observer),
+        "self": _self_record(env, observer),
         "neighbors": [
             _uav_record(observer, env.uavs[idx])
             for idx in sorted(subgroup - {observer_idx})

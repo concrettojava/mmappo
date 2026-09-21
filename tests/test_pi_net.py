@@ -24,7 +24,7 @@ class EntityTensorizerTests(unittest.TestCase):
 
     def test_environment_shapes_and_finite_values(self):
         batch = self.tensorizer.environment(self.obs)
-        self.assertEqual(batch.self_features.shape, (8, 14))
+        self.assertEqual(batch.self_features.shape, (8, 16))
         self.assertEqual(batch.entity_features.shape, (8, 14, 20))
         self.assertEqual(batch.evidence_mask.shape, (8, 14))
         self.assertEqual(batch.evidence_meta.shape, (8, 14, 4))
@@ -32,6 +32,14 @@ class EntityTensorizerTests(unittest.TestCase):
         self.assertTrue(np.isfinite(batch.self_features).all())
         self.assertTrue(np.isfinite(batch.entity_features).all())
         self.assertTrue(np.isfinite(batch.evidence_meta).all())
+        np.testing.assert_allclose(
+            batch.self_features[:, 14],
+            [self.env.communication_factor(u) for u in self.env.uavs],
+        )
+        np.testing.assert_allclose(
+            batch.self_features[:, 15],
+            [self.env.reconnaissance_factor(u) for u in self.env.uavs],
+        )
 
     def test_target_identity_uses_stable_slot(self):
         observer_idx = 0
@@ -95,7 +103,7 @@ class PIActorTests(unittest.TestCase):
         )
         self.actor = PIActor(self.cfg)
         self.B = 2
-        self.self_features = torch.zeros(self.B, 14)
+        self.self_features = torch.zeros(self.B, 16)
         self.self_features[:, 0] = 1.0
         self.self_features[:, 2] = 1.0  # Stk-enhanced
         self.self_features[:, 5] = 1.0

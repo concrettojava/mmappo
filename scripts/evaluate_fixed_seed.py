@@ -77,6 +77,7 @@ def load_pi_checkpoint(
     compile_actors: bool,
 ) -> tuple[PIMAPPO, FixedVectorizer, EntityTensorizer, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    FixedVectorizer.assert_checkpoint_compatible(checkpoint)
 
     fixed_cfg = checkpoint.get("fixed_vectorizer", {})
     fixed = FixedVectorizer(**fixed_cfg) if fixed_cfg else FixedVectorizer()

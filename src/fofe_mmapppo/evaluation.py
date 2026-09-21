@@ -41,6 +41,7 @@ def load_fixed_mappo_checkpoint(
     device: str,
 ) -> Tuple[MAPPO, FixedVectorizer, dict]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    FixedVectorizer.assert_checkpoint_compatible(checkpoint)
     vec_cfg = checkpoint.get("vectorizer", {})
     vectorizer = FixedVectorizer(**vec_cfg) if vec_cfg else FixedVectorizer()
     config = MAPPOConfig(**checkpoint.get("config", {}))

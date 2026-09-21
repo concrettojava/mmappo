@@ -51,7 +51,7 @@ class PIRecurrentMAPPOTests(unittest.TestCase):
         )
 
     def _actor_inputs(self, t: int):
-        sf = np.zeros((self.E, self.N, 14), dtype=np.float32)
+        sf = np.zeros((self.E, self.N, 16), dtype=np.float32)
         sf[..., 0] = 1.0
         sf[..., 2] = 1.0  # Stk
         sf[..., 5] = 1.0
@@ -133,7 +133,7 @@ class PIRecurrentMAPPOTests(unittest.TestCase):
     def test_buffer_preserves_time_environment_agent_axes(self):
         buffer = self._build_rollout()
         data = buffer.as_arrays()
-        self.assertEqual(data["self_features"].shape, (self.T, self.E, self.N, 14))
+        self.assertEqual(data["self_features"].shape, (self.T, self.E, self.N, 16))
         self.assertEqual(data["entity_features"].shape, (self.T, self.E, self.N, 14, 20))
         self.assertEqual(data["actions"].shape, (self.T, self.E, self.N))
         self.assertEqual(data["active"].shape, (self.T, self.E, self.N))

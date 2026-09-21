@@ -28,6 +28,7 @@ def main():
     args = p.parse_args()
 
     checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False)
+    FixedVectorizer.assert_checkpoint_compatible(checkpoint)
     start_episode = int(checkpoint.get("episode", 0))
     cfg = MAPPOConfig(**checkpoint.get("config", {}))
     cfg.minibatch_size = args.minibatch_size

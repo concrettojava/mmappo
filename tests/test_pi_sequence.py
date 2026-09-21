@@ -29,7 +29,7 @@ class PISequenceTests(unittest.TestCase):
         self.B = 2
         self.target_slot = 7
 
-        self.self_features = torch.zeros(self.T, self.B, 14)
+        self.self_features = torch.zeros(self.T, self.B, 16)
         self.self_features[..., 0] = 1.0
         self.self_features[..., 2] = 1.0  # Stk
         self.self_features[..., 5] = 1.0

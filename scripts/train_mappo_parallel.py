@@ -65,6 +65,7 @@ def save_checkpoint(path, learner, vectorizer, episode, num_envs, scenario):
             "episode": int(episode),
             "parallel_num_envs": int(num_envs),
             "scenario": str(scenario),
+            "observation_schema_version": 2,
             "vectorizer": {
                 "world_size": vectorizer.world_size,
                 "n_uavs": vectorizer.n_uavs,
@@ -117,6 +118,10 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        try:
+            FixedVectorizer.assert_checkpoint_compatible(checkpoint)
+        except ValueError as exc:
+            parser.error(str(exc))
         start_episode = int(checkpoint.get("episode", 0))
         checkpoint_scenario = str(checkpoint.get("scenario", "reference"))
         if checkpoint_scenario != args.scenario:
