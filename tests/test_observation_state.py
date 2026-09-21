@@ -48,6 +48,10 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(obs["self"]["idx"], 0)
         self.assertIn("geo", obs["self"]["pose"])
         self.assertIn("body", obs["self"]["pose"])
+        self.assertEqual(obs["self"]["comm_quality"], 1.0)
+        self.assertEqual(obs["self"]["recon_quality"], 1.0)
+        self.assertNotIn("comm_quality", obs["neighbors"][0])
+        self.assertNotIn("recon_quality", obs["neighbors"][0])
 
     def test_multihop_subgroup_shares_target_detection(self):
         # Put M0 inside U4's large Rec range but outside U0's direct Stk range.
