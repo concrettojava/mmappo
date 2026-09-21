@@ -29,6 +29,19 @@ def _uav_record(observer, uav) -> Dict[str, Any]:
     }
 
 
+def _self_record(env, observer) -> Dict[str, Any]:
+    """Return the observer-only record, including local equipment health.
+
+    The jammer field remains simulator-private. These values describe only the
+    observing UAV's local communication and reconnaissance equipment; they are
+    deliberately not attached to teammate records.
+    """
+    record = _uav_record(observer, observer)
+    record["comm_quality"] = float(env.communication_factor(observer))
+    record["recon_quality"] = float(env.reconnaissance_factor(observer))
+    return record
+
+
 def _target_record(observer, target) -> Dict[str, Any]:
     return {
         "idx": int(target.idx),
@@ -48,19 +61,16 @@ def _threat_record(observer, threat) -> Dict[str, Any]:
     }
 
 
-def get_observation(env, observer_idx: int):
-    """Return Eq. (8)-style local flexible observation for one RSUAV."""
+def _observation_from_shared(env, observer_idx: int, components, shared):
+    """Materialize one observation from already-computed topology/detections."""
     observer = env.uavs[observer_idx]
     if not observer.alive:
         return None
 
-    shared = env.shared_detection()
-    components = env.communication_components()
     subgroup = components.get(observer_idx, {observer_idx})
     visible_targets, visible_threats = shared[observer_idx]
-
     return {
-        "self": _uav_record(observer, observer),
+        "self": _self_record(env, observer),
         "neighbors": [
             _uav_record(observer, env.uavs[idx])
             for idx in sorted(subgroup - {observer_idx})
@@ -78,6 +88,35 @@ def get_observation(env, observer_idx: int):
     }
 
 
+def get_observation(env, observer_idx: int):
+    """Return Eq. (8)-style local flexible observation for one RSUAV.
+
+    This single-agent helper preserves the public/debug API.  The all-agent hot
+    path below computes topology and shared detections once for the entire
+    environment step.
+    """
+    observer = env.uavs[observer_idx]
+    if not observer.alive:
+        return None
+    graph = env.communication_graph()
+    components = env.communication_components(graph=graph)
+    shared = env.shared_detection(graph=graph)
+    return _observation_from_shared(env, observer_idx, components, shared)
+
+
 def get_observations(env):
-    """Return local flexible observations for all RSUAVs."""
-    return {u.idx: get_observation(env, u.idx) for u in env.uavs}
+    """Return local flexible observations for all RSUAVs.
+
+    Communication topology and direct/shared detections are properties of the
+    environment step, not of the observer.  Older code rebuilt them separately
+    for every UAV (two communication-graph builds per observer).  Compute them
+    once here and reuse the result while only the coordinate-frame
+    materialization remains observer-specific.
+    """
+    graph = env.communication_graph()
+    components = env.communication_components(graph=graph)
+    shared = env.shared_detection(graph=graph)
+    return {
+        u.idx: _observation_from_shared(env, u.idx, components, shared)
+        for u in env.uavs
+    }
