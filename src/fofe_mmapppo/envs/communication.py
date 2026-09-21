@@ -13,16 +13,25 @@ def communication_graph(env) -> Dict[int, Set[int]]:
     contested scenario each endpoint's effective communication range is reduced
     by the local jammer field; a link must fit inside the better endpoint's
     degraded radio range, preserving the original heterogeneous-range logic.
+
+    The degraded radio range is a per-UAV quantity for a fixed environment
+    step.  Compute it once per living UAV rather than once per pair endpoint.
+    With eight living UAVs this changes the expensive contested jammer queries
+    from up to 56 calls per graph build to eight, without changing graph
+    semantics.
     """
     alive = [u for u in env.uavs if u.alive]
     graph = {u.idx: set() for u in alive}
+    effective_ranges = {
+        u.idx: float(u.p["comm_range"]) * env.communication_factor(u)
+        for u in alive
+    }
     for i, a in enumerate(alive):
+        range_a = effective_ranges[a.idx]
         for b in alive[i + 1:]:
             dx = a.x - b.x
             dy = a.y - b.y
-            range_a = float(a.p["comm_range"]) * env.communication_factor(a)
-            range_b = float(b.p["comm_range"]) * env.communication_factor(b)
-            limit = max(range_a, range_b)
+            limit = max(range_a, effective_ranges[b.idx])
             if dx * dx + dy * dy < limit * limit:
                 graph[a.idx].add(b.idx)
                 graph[b.idx].add(a.idx)
