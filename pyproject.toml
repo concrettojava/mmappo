@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fofe-mmapppo"
-version = "0.2.0"
-description = "FOFE-MMAPPO cooperative UAV environment and MARL reproduction"
+name = "info-mappo"
+version = "0.1.0"
+description = "Clean MAPPO training for the contested cooperative UAV environment"
 requires-python = ">=3.10"
-dependencies = ["numpy", "matplotlib"]
+dependencies = ["numpy"]
 
 [project.optional-dependencies]
-rl = ["torch>=2.2", "tensorboard>=2.16"]
+rl = ["torch>=2.2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
