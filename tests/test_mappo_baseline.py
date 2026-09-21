@@ -23,11 +23,11 @@ class VectorizerTests(unittest.TestCase):
         self.vec = FixedVectorizer()
 
     def test_fixed_dimensions(self):
-        self.assertEqual(self.vec.observation_dim, 182)
+        self.assertEqual(self.vec.observation_dim, 184)
         self.assertEqual(self.vec.state_dim, 280)
         obs = self.vec.batch_observations(self.obs)
         states = self.vec.batch_states(self.states)
-        self.assertEqual(obs.shape, (8, 182))
+        self.assertEqual(obs.shape, (8, 184))
         self.assertEqual(states.shape, (8, 280))
         self.assertTrue(np.isfinite(obs).all())
         self.assertTrue(np.isfinite(states).all())
@@ -46,7 +46,7 @@ class VectorizerTests(unittest.TestCase):
         vector = self.vec.observation(obs)
         # Self record is present; at least all padded record-presence bits are zero.
         self.assertEqual(vector[0], 1.0)
-        neighbor_start = self.vec.uav_dim
+        neighbor_start = self.vec.self_dim
         for slot in range(self.vec.n_uavs - 1):
             self.assertEqual(vector[neighbor_start + slot * self.vec.uav_dim], 0.0)
 
@@ -55,6 +55,10 @@ class VectorizerTests(unittest.TestCase):
         obs = self.env.get_observations()
         vector = self.vec.observation(obs[0])
         self.assertTrue(np.array_equal(vector, np.zeros(self.vec.observation_dim, dtype=np.float32)))
+
+    def test_legacy_checkpoint_schema_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "legacy 182-dimensional"):
+            FixedVectorizer.assert_checkpoint_compatible({})
 
 
 class GAETests(unittest.TestCase):
