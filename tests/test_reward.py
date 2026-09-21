@@ -64,6 +64,19 @@ class MissionBoundaryActionTests(unittest.TestCase):
         after = mission_reward(self.env)
         self.assertLess(after, before)
 
+    def test_task_aligned_time_cost_does_not_grow_every_step(self):
+        env = CooperativeUAVEnv(seed=7, reward_profile="task_aligned")
+        env.reset()
+        env.step_count = 100
+        self.assertAlmostEqual(mission_reward(env), -0.01)
+
+    def test_task_aligned_profile_explicitly_rewards_completion(self):
+        env = CooperativeUAVEnv(seed=7, reward_profile="task_aligned")
+        env.reset()
+        for target in env.targets:
+            target.alive = False
+        self.assertGreater(mission_reward(env), 100.0)
+
     def test_boundary_penalty_only_near_boundary(self):
         u = self.env.uavs[0]
         u.x = 2000.0
